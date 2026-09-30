@@ -1,5 +1,7 @@
 # monitor2 開発引き継ぎ
 
+> この文書は刷新前の分析・計画を残した引き継ぎです。2026-10-01以降の試作状況は[docs/prototype.md](docs/prototype.md)を参照してください。
+
 ## 目的・ユーザーの希望
 
 - 個人用のWindows CPU／メモリ／NVIDIA GPUモニターガジェットを刷新する。
