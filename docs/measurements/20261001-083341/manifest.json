@@ -1,0 +1,14 @@
+{
+  "LegacyProcessId": 35656,
+  "LegacyPath": "C:\\Monitor.exe",
+  "LegacyStartedAt": "2026-10-01T08:31:35.2840662+09:00",
+  "Monitor2ProcessId": 33416,
+  "Monitor2Path": "D:\\home\\monitor2\\target\\release\\monitor2.exe",
+  "Monitor2StartedAt": "2026-10-01T08:25:35.0104892+09:00",
+  "Monitor2Commit": "f9fd7584cae5fed00d405f5faae06a9fd3662b90",
+  "Monitor2SHA256": "88307B30AC0A77C409487C036E2A487BF0EE4E3606CEE3F433C738CBC668BF82",
+  "Monitor2Bytes": 629760,
+  "RustVersion": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "Monitor2Settings": "topmost=true\nautostart=true\ninterval_ms=1000\nphysical_cores=false\nshow_core_percent=true\nshow_core_numbers=false\n",
+  "Notes": "Both existing processes retained. No build, restart, UI input or setting changes during measurement."
+}

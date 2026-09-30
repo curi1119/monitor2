@@ -1,4 +1,4 @@
-# 旧版と初版試作の性能比較
+# 旧版とmonitor2の性能比較
 
 2026-10-01に同じ実機上で同時測定しました。
 最終試作版の起動時動作と参照寿命を修正した後、再測定した結果です。
@@ -78,3 +78,27 @@ NVAPIを使う旧版とNVMLを使う試作では、GPU取得値の意味や処�
 測定中にドキュメント・ZIP作成と、別プロセスで6秒の起動終了テストも行っています。
 この短い1回の測定から長時間の安定性や一般的な性能を保証するものではありません。
 原データは[measurements/features/summary.json](measurements/features/summary.json)と[samples.csv](measurements/features/samples.csv)です。
+
+## 現行版と旧版PID35656の比較
+
+2026-10-01 08:33:41 JST開始、120.978秒、2秒間隔で61サンプル。
+旧版PID35656（C:\Monitor.exe、08:31:35起動）とmonitor2 PID33416（release、通常常駐、08:25:35起動）を同時測定しました。両プロセスとも起動済みのため追加のウォームアップ待機は行っていません。測定中に再起動・設定変更・UI操作・ビルドは行っていません。
+
+monitor2は1秒更新、論理コア、使用率%表示、CPU番号非表示、最前面オン、自動起動オン。画面は172×320 DIP。旧版ソースのタイマー設定は1000msです。
+対象のコードはf9fd758。未コミット差分は開発文書のみで、アプリコードの変更はありません。Rust 1.98.1、16論理CPU、EXE 629,760 bytes。
+EXE SHA256: 88307B30AC0A77C409487C036E2A487BF0EE4E3606CEE3F433C738CBC668BF82。
+
+| 指標 | 旧版 Monitor | 現行monitor2 |
+|---|---:|---:|
+| 区間のCPU時間 | 0.46875秒 | 0.09375秒 |
+| 平均CPU使用率（1論理CPU=100%） | 0.3875% | 0.0775% |
+| 平均CPU使用率（16論理CPU全体=100%） | 0.0242% | 0.0048% |
+| 平均Working Set | 62.864 MiB | 44.101 MiB |
+| 平均Private Bytes | 48.727 MiB | 27.681 MiB |
+| Private Bytes開始→終了 | 48.793→48.734 MiB | 27.676→27.762 MiB |
+| ハンドル数開始→終了 | 553→548 | 250→250 |
+
+今回の観測ではmonitor2のCPU時間は80%少なく、Working Setは約30%、Private Bytesは約43%少なくなりました。
+monitor2のPrivate Bytesの開始・終了差は0.086 MiBで、ハンドル数は変わっていません。短時間・低CPU負荷での1回の測定なので、CPUの比率は計測粒度や周辺負荷で変動します。
+
+原データ: [summary.json](measurements/20261001-083341/summary.json)、[samples.csv](measurements/20261001-083341/samples.csv)、[測定対象と設定](measurements/20261001-083341/manifest.json)。
