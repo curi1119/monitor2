@@ -1,1 +1,31 @@
+# Rust build output (Cargo.lock is tracked for this application)
 /target/
+**/*.rs.bk
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# VS Code: keep shared project configuration eligible for version control
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.code-workspace
+
+# Other editors and temporary files
+.idea/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local AI notes and generated scratch files
+/.agents/local/
