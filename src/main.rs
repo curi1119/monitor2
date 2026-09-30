@@ -5,11 +5,14 @@ compile_error!("monitor2 requires Windows");
 
 mod hardware;
 mod nvml;
+mod settings;
+mod settings_ui;
+mod topology;
 mod ui;
 
 use hardware::{Sampler, Snapshot};
 use std::{
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -36,16 +39,28 @@ fn probe() -> Result<(), String> {
     let mut sampler = Sampler::new();
     for _ in 0..3 {
         thread::sleep(Duration::from_secs(1));
-        println!("{:#?}", sampler.sample());
+        let sample = sampler.sample();
+        println!("{sample:#?}");
+        println!(
+            "Age: {:?}, CPU error: {:?}",
+            sample.sampled_at.map(|t| t.elapsed()),
+            sample.cpu_error
+        );
+        for gpu in &sample.gpus {
+            println!("GPU error: {:?}", gpu.error);
+        }
+        if let Some(ram) = sample.ram {
+            println!("RAM usage: {:.1}%", ram.percent());
+        }
     }
     Ok(())
 }
 
 fn run(smoke_test: bool, preview: bool) -> Result<(), String> {
     let latest = Arc::new(Mutex::new(Snapshot::default()));
-    let stop = Arc::new((Mutex::new(false), Condvar::new()));
+    let settings = Arc::new(settings::SharedSettings::new(settings::Settings::load()?));
     let worker_latest = Arc::clone(&latest);
-    let worker_stop = Arc::clone(&stop);
+    let worker_settings = Arc::clone(&settings);
     let worker = thread::Builder::new()
         .name("hardware-sampler".into())
         .spawn(move || {
@@ -54,21 +69,14 @@ fn run(smoke_test: bool, preview: bool) -> Result<(), String> {
             loop {
                 let sample = sampler.sample();
                 *worker_latest.lock().unwrap_or_else(|e| e.into_inner()) = sample;
-                let (lock, wake) = &*worker_stop;
-                let stopped = lock.lock().unwrap_or_else(|e| e.into_inner());
-                let (stopped, _) = wake
-                    .wait_timeout_while(stopped, Duration::from_secs(1), |v| !*v)
-                    .unwrap_or_else(|e| e.into_inner());
-                if *stopped {
+                if worker_settings.wait() {
                     break;
                 }
             }
         })
         .map_err(|e| format!("Cannot start sampler: {e}"))?;
-    let result = ui::run(latest, smoke_test, preview);
-    let (lock, wake) = &*stop;
-    *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
-    wake.notify_one();
+    let result = ui::run(latest, settings.clone(), smoke_test, preview);
+    settings.stop();
     worker
         .join()
         .map_err(|_| "Hardware sampler panicked".to_string())?;

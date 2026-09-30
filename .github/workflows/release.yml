@@ -1,0 +1,63 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Cargo.tomlと同じバージョン（例 0.1.0）
+        required: true
+        type: string
+      draft:
+        description: 下書きとして作成する
+        default: false
+        type: boolean
+permissions:
+  contents: write
+concurrency:
+  group: monitor2-release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_DRAFT: ${{ inputs.draft }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate version
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw 'Invalid version' }
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
+          if ($metadata.packages[0].version -ne $env:RELEASE_VERSION) { throw 'Version must match Cargo.toml' }
+          $tag = "v$env:RELEASE_VERSION"
+          $existing = git ls-remote --tags origin "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0 -or $existing) { throw 'Cannot verify tag, or tag already exists' }
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+      - name: Package
+        shell: pwsh
+        run: ./scripts/package-release.ps1 -Version $env:RELEASE_VERSION
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: monitor2-windows-x64
+          path: |
+            target/dist/*.zip
+            target/dist/*.sha256
+          if-no-files-found: error
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $releaseArgs = @('release', 'create', "v$env:RELEASE_VERSION", "target/dist/monitor2-$env:RELEASE_VERSION-windows-x64.zip", "target/dist/monitor2-$env:RELEASE_VERSION-windows-x64.zip.sha256", '--target', $env:GITHUB_SHA, '--generate-notes')
+          if ($env:RELEASE_DRAFT -eq 'true') { $releaseArgs += '--draft' }
+          if ($env:RELEASE_VERSION.Contains('-')) { $releaseArgs += '--prerelease' }
+          & gh @releaseArgs
+          if ($LASTEXITCODE -ne 0) { throw 'Release creation failed' }

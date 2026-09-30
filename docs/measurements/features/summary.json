@@ -1,0 +1,44 @@
+{
+  "StartedAt": "2026-10-01T08:08:57.3788085+09:00",
+  "LogicalProcessors": 16,
+  "Summary": [
+    {
+      "Label": "legacy",
+      "ProcessId": 20724,
+      "Samples": 61,
+      "DurationSeconds": 120.958,
+      "CPUSeconds": 0.46875,
+      "CPUPercentOneCore": 0.3875,
+      "CPUPercentWholeMachine": 0.0242,
+      "WorkingSetMiBMean": 52.192,
+      "WorkingSetMiBMin": 51.957,
+      "WorkingSetMiBMax": 52.297,
+      "PrivateMiBMean": 47.278,
+      "PrivateMiBMin": 47.0,
+      "PrivateMiBMax": 47.5,
+      "PrivateMiBStart": 47.316,
+      "PrivateMiBEnd": 47.375,
+      "HandlesStart": 579,
+      "HandlesEnd": 576
+    },
+    {
+      "Label": "prototype",
+      "ProcessId": 38328,
+      "Samples": 61,
+      "DurationSeconds": 120.958,
+      "CPUSeconds": 0.125,
+      "CPUPercentOneCore": 0.1033,
+      "CPUPercentWholeMachine": 0.0065,
+      "WorkingSetMiBMean": 44.21,
+      "WorkingSetMiBMin": 44.18,
+      "WorkingSetMiBMax": 44.23,
+      "PrivateMiBMean": 27.637,
+      "PrivateMiBMin": 27.559,
+      "PrivateMiBMax": 27.711,
+      "PrivateMiBStart": 27.711,
+      "PrivateMiBEnd": 27.559,
+      "HandlesStart": 254,
+      "HandlesEnd": 252
+    }
+  ]
+}

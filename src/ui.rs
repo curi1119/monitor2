@@ -17,7 +17,7 @@ use windows_sys::{
 
 const TIMER: usize = 1;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
-const WIDTH: i32 = 280;
+const WIDTH: i32 = 172;
 const BG: u32 = 0x00211A16;
 const TEXT: u32 = 0x00F3EDE5;
 const MUTED: u32 = 0x00AD9B8A;
@@ -69,7 +69,7 @@ impl GdiObjects {
                 *font = null_mut();
             }
         }
-        for (i, (size, weight)) in [(18, 700), (12, 600), (10, 400)].into_iter().enumerate() {
+        for (i, (size, weight)) in [(13, 600), (12, 500), (11, 400)].into_iter().enumerate() {
             // SAFETY: create owned GDI objects; sizes are scaled to the window DPI.
             self.fonts[i] = unsafe {
                 CreateFontW(
@@ -145,6 +145,44 @@ impl Drop for GdiObjects {
     }
 }
 
+// Owned icons loaded at the exact pixel size used for drawing. LR_SHARED caches by
+// resource name irrespective of requested size, so these handles must be destroyed.
+struct Logos([HICON; 3]);
+impl Logos {
+    fn new(dpi: u32) -> Result<Self, String> {
+        let mut icons = Self([null_mut(); 3]);
+        let instance = unsafe { GetModuleHandleW(null()) };
+        for (i, icon) in icons.0.iter_mut().enumerate() {
+            *icon = unsafe {
+                LoadImageW(
+                    instance,
+                    (i + 2) as _,
+                    IMAGE_ICON,
+                    scale(28, dpi),
+                    scale(28, dpi),
+                    0,
+                )
+            }
+            .cast();
+            if icon.is_null() {
+                return Err(last_error("Load brand icon"));
+            }
+        }
+        Ok(icons)
+    }
+}
+impl Drop for Logos {
+    fn drop(&mut self) {
+        for icon in self.0 {
+            if !icon.is_null() {
+                unsafe {
+                    DestroyIcon(icon);
+                }
+            }
+        }
+    }
+}
+
 struct App {
     latest: Arc<Mutex<Snapshot>>,
     snapshot: Snapshot,
@@ -154,26 +192,42 @@ struct App {
     content_height: i32,
     height: i32,
     topmost: bool,
+    settings: Arc<crate::settings::SharedSettings>,
+    preferences: crate::settings::Settings,
+    dialog: HWND,
+    logos: Logos,
     tray: NOTIFYICONDATAW,
     taskbar_message: u32,
     smoke_deadline: Option<Instant>,
 }
 
-pub fn run(latest: Arc<Mutex<Snapshot>>, smoke_test: bool, preview: bool) -> Result<(), String> {
+pub fn run(
+    latest: Arc<Mutex<Snapshot>>,
+    settings: Arc<crate::settings::SharedSettings>,
+    smoke_test: bool,
+    preview: bool,
+) -> Result<(), String> {
     // SAFETY: process DPI mode is established before creating any window.
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
     let dpi = unsafe { GetDpiForSystem() }.max(96);
+    let preferences = settings.get();
+    let instance = unsafe { GetModuleHandleW(null()) };
+    let resource_icon = |id: usize| unsafe { LoadIconW(instance, id as _) };
     let mut app = Box::new(App {
         latest,
         snapshot: Snapshot::default(),
         gdi: GdiObjects::new(dpi)?,
         dpi,
         scroll: 0,
-        content_height: 400,
-        height: 400,
-        topmost: true,
+        content_height: 320,
+        height: 320,
+        topmost: preferences.topmost,
+        settings,
+        preferences,
+        dialog: null_mut(),
+        logos: Logos::new(dpi)?,
         tray: NOTIFYICONDATAW::default(),
         taskbar_message: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
         smoke_deadline: smoke_test.then(|| Instant::now() + Duration::from_secs(6)),
@@ -184,6 +238,7 @@ pub fn run(latest: Arc<Mutex<Snapshot>>, smoke_test: bool, preview: bool) -> Res
         hInstance: instance,
         lpszClassName: w!("Monitor2Window"),
         hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
+        hIcon: resource_icon(1),
         ..Default::default()
     };
     // SAFETY: registered class and Box<App> remain live until the message loop ends.
@@ -196,14 +251,14 @@ pub fn run(latest: Arc<Mutex<Snapshot>>, smoke_test: bool, preview: bool) -> Res
                 WS_EX_APPWINDOW
             } else {
                 WS_EX_TOOLWINDOW
-            }) | WS_EX_TOPMOST,
+            }) | if app.topmost { WS_EX_TOPMOST } else { 0 },
             class.lpszClassName,
             w!("monitor2"),
             WS_POPUP,
             40,
             80,
             scale(WIDTH, dpi),
-            scale(400, dpi),
+            scale(320, dpi),
             null_mut(),
             null_mut(),
             instance,
@@ -229,12 +284,12 @@ pub fn run(latest: Arc<Mutex<Snapshot>>, smoke_test: bool, preview: bool) -> Res
     app.tray.uID = 1;
     app.tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     app.tray.uCallbackMessage = TRAY_MESSAGE;
-    app.tray.hIcon = unsafe { LoadIconW(null_mut(), IDI_APPLICATION) };
+    app.tray.hIcon = resource_icon(1);
     let tooltip = wide("monitor2 - CPU / RAM / NVIDIA GPU");
     app.tray.szTip[..tooltip.len()].copy_from_slice(&tooltip);
     unsafe {
         Shell_NotifyIconW(NIM_ADD, &app.tray);
-        if SetTimer(hwnd, TIMER, 1000, None) == 0 {
+        if SetTimer(hwnd, TIMER, app.preferences.interval_ms, None) == 0 {
             DestroyWindow(hwnd);
             UnregisterClassW(class.lpszClassName, instance);
             return Err(last_error("SetTimer"));
@@ -253,6 +308,9 @@ pub fn run(latest: Arc<Mutex<Snapshot>>, smoke_test: bool, preview: bool) -> Res
         }
         if status == 0 {
             break Ok(());
+        }
+        if !app.dialog.is_null() && unsafe { IsDialogMessageW(app.dialog, &message) } != 0 {
+            continue;
         }
         unsafe {
             TranslateMessage(&message);
@@ -314,18 +372,39 @@ unsafe extern "system" fn window_proc(
         }
         WM_ERASEBKGND => 1,
         WM_LBUTTONDOWN => {
-            let dpi = unsafe { (*pointer).dpi };
-            let x = (lparam as u32 & 0xffff) as i32;
-            let y = ((lparam as u32 >> 16) & 0xffff) as i32;
-            if x > scale(WIDTH - 36, dpi) && y < scale(38, dpi) {
-                unsafe {
-                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                }
-            } else {
-                unsafe {
-                    windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
-                    SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
-                }
+            unsafe {
+                windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+                SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+            }
+            0
+        }
+        crate::settings_ui::CHANGED => {
+            let preferences = unsafe { (*pointer).settings.get() };
+            let topmost = preferences.topmost;
+            unsafe {
+                (*pointer).topmost = topmost;
+                SetTimer(hwnd, TIMER, preferences.interval_ms, None);
+                (*pointer).preferences = preferences;
+                SetWindowPos(
+                    hwnd,
+                    if topmost {
+                        HWND_TOPMOST
+                    } else {
+                        HWND_NOTOPMOST
+                    },
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+                refresh(hwnd, pointer);
+            }
+            0
+        }
+        crate::settings_ui::CLOSED => {
+            unsafe {
+                (*pointer).dialog = null_mut();
             }
             0
         }
@@ -364,6 +443,13 @@ unsafe extern "system" fn window_proc(
             let suggested = unsafe { *(lparam as *const RECT) };
             unsafe {
                 (*pointer).dpi = dpi;
+                match Logos::new(dpi) {
+                    Ok(logos) => (*pointer).logos = logos,
+                    Err(error) => {
+                        eprintln!("{error}");
+                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    }
+                }
                 if let Err(error) = (*pointer).gdi.fonts(dpi) {
                     eprintln!("{error}");
                     PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -391,6 +477,11 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             unsafe {
+                let dialog = (*pointer).dialog;
+                (*pointer).dialog = null_mut();
+                if !dialog.is_null() {
+                    DestroyWindow(dialog);
+                }
                 KillTimer(hwnd, TIMER);
                 Shell_NotifyIconW(NIM_DELETE, &(*pointer).tray);
                 PostQuitMessage(0);
@@ -420,8 +511,53 @@ unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
         // End this mutable borrow before SetWindowPos can dispatch nested messages.
         let app = unsafe { &mut *pointer };
         app.snapshot = app.latest.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let rows = app.snapshot.cpus.len().div_ceil(4) as i32;
-        app.content_height = 284 + rows * 26 + app.snapshot.gpus.len().max(1) as i32 * 140;
+        let stale = app.snapshot.sampled_at.is_some_and(|at| {
+            at.elapsed() > Duration::from_millis((app.preferences.interval_ms as u64 * 3).max(3000))
+        });
+        if stale {
+            app.snapshot.cpu_total = None;
+            for cpu in app
+                .snapshot
+                .cpus
+                .iter_mut()
+                .chain(app.snapshot.physical_cpus.iter_mut())
+            {
+                cpu.usage = None;
+            }
+            app.snapshot.ram = None;
+            for gpu in &mut app.snapshot.gpus {
+                gpu.usage = None;
+                gpu.temperature = None;
+                gpu.used = None;
+                gpu.total = None;
+            }
+        }
+        let tip = if stale {
+            "monitor2 - STALE".to_string()
+        } else if let Some(error) = app
+            .snapshot
+            .cpu_error
+            .as_ref()
+            .or_else(|| app.snapshot.gpus.iter().find_map(|g| g.error.as_ref()))
+        {
+            format!("monitor2 - {error}")
+        } else {
+            "monitor2 - CPU / RAM / NVIDIA GPU".to_string()
+        };
+        let mut tooltip = [0u16; 128];
+        for (slot, value) in tooltip.iter_mut().take(127).zip(tip.encode_utf16()) {
+            *slot = value;
+        }
+        if app.tray.szTip != tooltip {
+            app.tray.szTip = tooltip;
+            unsafe {
+                Shell_NotifyIconW(NIM_MODIFY, &app.tray);
+            }
+        }
+
+        let cpus = displayed_cpus(app);
+        let rows = core_rows(cpus.len());
+        app.content_height = 112 + rows * 13 + app.snapshot.gpus.len().max(1) as i32 * 104;
         let mut info = MONITORINFO {
             cbSize: size_of::<MONITORINFO>() as u32,
             ..Default::default()
@@ -458,20 +594,13 @@ unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
     }
 }
 unsafe fn menu(hwnd: HWND, pointer: *mut App) {
-    // Do not hold an App reference while TrackPopupMenu dispatches nested window messages.
-    let topmost = unsafe { (*pointer).topmost };
     let menu = unsafe { CreatePopupMenu() };
     if menu.is_null() {
         return;
     }
     unsafe {
-        AppendMenuW(
-            menu,
-            MF_STRING | if topmost { MF_CHECKED } else { 0 },
-            1,
-            w!("Always on top"),
-        );
-        AppendMenuW(menu, MF_STRING, 2, w!("Exit"));
+        AppendMenuW(menu, MF_STRING, 1, w!("設定"));
+        AppendMenuW(menu, MF_STRING, 2, w!("終了"));
     }
     let mut point = POINT::default();
     unsafe {
@@ -494,26 +623,40 @@ unsafe fn menu(hwnd: HWND, pointer: *mut App) {
         PostMessageW(hwnd, WM_NULL, 0, 0);
     }
     match choice {
-        1 => unsafe {
-            (*pointer).topmost = !topmost;
-            SetWindowPos(
-                hwnd,
-                if topmost {
-                    HWND_NOTOPMOST
-                } else {
-                    HWND_TOPMOST
-                },
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
-        },
+        1 => {
+            let dialog = unsafe { (*pointer).dialog };
+            if !dialog.is_null() {
+                unsafe {
+                    SetForegroundWindow(dialog);
+                }
+            } else {
+                let shared = unsafe { Arc::clone(&(*pointer).settings) };
+                match crate::settings_ui::open(hwnd, shared) {
+                    Ok(dialog) => unsafe {
+                        (*pointer).dialog = dialog;
+                    },
+                    Err(error) => show_error(&error),
+                }
+            }
+        }
         2 => unsafe {
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
         },
         _ => {}
+    }
+}
+fn displayed_cpus(app: &App) -> &[crate::hardware::LogicalCpu] {
+    if app.preferences.physical_cores {
+        &app.snapshot.physical_cpus
+    } else {
+        &app.snapshot.cpus
+    }
+}
+fn core_rows(count: usize) -> i32 {
+    if count <= 8 {
+        count as i32
+    } else {
+        count.div_ceil(2) as i32
     }
 }
 
@@ -536,94 +679,116 @@ fn paint(hwnd: HWND, app: &mut App) {
         fonts: app.gdi.fonts,
     };
     painter.rect(0, app.scroll, WIDTH, app.height, BG);
-    painter.text(16, 16, 216, 28, "MONITOR", 0, TEXT);
-    painter.text(WIDTH - 32, 17, 20, 24, "×", 1, MUTED);
-    painter.text(16, 50, WIDTH - 32, 20, &app.snapshot.cpu_name, 2, MUTED);
-    painter.text(16, 80, 200, 22, "CPU", 1, CPU_COLOR);
-    painter.value(80, app.snapshot.cpu_total, CPU_COLOR);
-    painter.bar(16, 108, WIDTH - 32, 8, app.snapshot.cpu_total, CPU_COLOR);
-    let rows = app.snapshot.cpus.len().div_ceil(4) as i32;
-    for (i, cpu) in app.snapshot.cpus.iter().enumerate() {
-        let x = 16 + (i % 4) as i32 * 63;
-        let y = 128 + (i / 4) as i32 * 26;
-        let label = if app.snapshot.cpus.iter().any(|c| c.group != 0) {
-            format!("{}:{}", cpu.group, cpu.index)
-        } else {
-            format!("{:02}", cpu.index)
-        };
-        let value = cpu.usage.map_or("--".into(), |v| format!("{v:.0}%"));
-        painter.text(x, y, 58, 16, &format!("{label} {value}"), 2, MUTED);
-        painter.bar(x, y + 18, 56, 3, cpu.usage, CPU_COLOR);
-    }
-    let ram_y = 144 + rows * 26;
-    painter.rect(16, ram_y - 10, WIDTH - 32, 1, TRACK);
-    painter.text(16, ram_y, 180, 24, "RAM", 1, RAM_COLOR);
-    painter.value(ram_y, app.snapshot.ram.map(|m| m.percent()), RAM_COLOR);
-    let ram_text = app.snapshot.ram.map_or("N/A".into(), |m| {
-        format!("{:.1} / {:.1} GiB used", gib(m.used()), gib(m.total))
-    });
-    painter.text(16, ram_y + 30, WIDTH - 32, 20, &ram_text, 1, TEXT);
-    let available = app.snapshot.ram.map_or("Available: N/A".into(), |m| {
-        format!("Available: {:.1} GiB", gib(m.available))
-    });
-    painter.text(16, ram_y + 53, WIDTH - 32, 18, &available, 2, MUTED);
-    painter.bar(
+    let cpus = displayed_cpus(app);
+    let rows = core_rows(cpus.len());
+    let logo = if app.snapshot.cpu_name.to_ascii_lowercase().contains("intel") {
+        app.logos.0[0]
+    } else {
+        app.logos.0[1]
+    };
+    painter.icon(4, 4, 28, logo);
+    painter.text(38, 2, 98, 18, "CPU Usage", 0, TEXT);
+    painter.text(
+        124,
         16,
-        ram_y + 80,
-        WIDTH - 32,
-        8,
-        app.snapshot.ram.map(|m| m.percent()),
+        44,
+        18,
+        &percentage(app.snapshot.cpu_total),
+        1,
+        TEXT,
+    );
+    painter.bar(38, 23, 78, 8, app.snapshot.cpu_total, CPU_COLOR);
+    let cpu_name = app.snapshot.cpu_name.trim_end_matches(" Processor");
+    let cpu_name = cpu_name
+        .rsplit_once(' ')
+        .filter(|(_, suffix)| suffix.ends_with("-Core"))
+        .map_or(cpu_name, |(model, _)| model);
+    painter.text(4, 33, WIDTH - 8, 16, cpu_name, 2, CPU_COLOR);
+    painter.memory(
+        49,
+        "RAM",
+        app.snapshot.ram.map(|m| (m.used(), m.available, m.total)),
         RAM_COLOR,
     );
-    let gpu_start = ram_y + 114;
-    for (i, gpu) in app.snapshot.gpus.iter().enumerate() {
-        let y = gpu_start + i as i32 * 140;
-        painter.rect(16, y - 10, WIDTH - 32, 1, TRACK);
-        painter.text(16, y, 110, 22, &format!("GPU {i}"), 1, GPU_COLOR);
-        let temp = gpu.temperature.map_or("N/A".into(), |t| format!("{t} °C"));
-        painter.text(134, y, 70, 22, &temp, 1, MUTED);
-        painter.value(y, gpu.usage, GPU_COLOR);
-        painter.text(16, y + 27, WIDTH - 32, 18, &gpu.name, 2, MUTED);
-        painter.bar(16, y + 54, WIDTH - 32, 8, gpu.usage, GPU_COLOR);
-        let vram = match (gpu.used, gpu.total) {
-            (Some(used), Some(total)) => format!("VRAM  {:.1} / {:.1} GiB", gib(used), gib(total)),
-            _ => "VRAM  N/A".into(),
+    painter.rect(6, 97, WIDTH - 12, 1, TRACK);
+    for (i, cpu) in cpus.iter().enumerate() {
+        let column = if cpus.len() <= 8 {
+            0
+        } else {
+            i / rows as usize
         };
-        painter.text(16, y + 76, WIDTH - 32, 20, &vram, 1, TEXT);
-        let percent = gpu
+        let row = if cpus.len() <= 8 {
+            i
+        } else {
+            i % rows as usize
+        };
+        let x = 4 + column as i32 * 86;
+        let y = 101 + row as i32 * 13;
+        let width = if cpus.len() <= 8 { WIDTH - 8 } else { 78 };
+        let number_width = if app.preferences.show_core_numbers {
+            20
+        } else {
+            0
+        };
+        if app.preferences.show_core_numbers {
+            painter.text(x, y, 20, 13, &format!("{:02}", cpu.index), 2, MUTED);
+        }
+        let percent_width = if app.preferences.show_core_percent {
+            30
+        } else {
+            0
+        };
+        let bar_width = width - number_width - percent_width - 2;
+        let colors = [0x004C9AFF, 0x006DDDB1, 0x00FFB873, 0x00D795D8];
+        painter.bar(
+            x + number_width,
+            y + 3,
+            bar_width,
+            8,
+            cpu.usage,
+            colors[i % colors.len()],
+        );
+        if app.preferences.show_core_percent {
+            painter.text(x + width - 30, y, 30, 13, &percentage(cpu.usage), 2, TEXT);
+        }
+    }
+    let gpu_start = 108 + rows * 13;
+    for (i, gpu) in app.snapshot.gpus.iter().enumerate() {
+        let y = gpu_start + i as i32 * 104;
+        painter.rect(6, y - 5, WIDTH - 12, 1, TRACK);
+        painter.icon(4, y + 1, 28, app.logos.0[2]);
+        painter.text(38, y, 98, 18, "GPU Usage", 0, TEXT);
+        painter.text(
+            130,
+            y,
+            38,
+            16,
+            &gpu.temperature.map_or("N/A".into(), |t| format!("{t}°")),
+            2,
+            GPU_COLOR,
+        );
+        painter.text(124, y + 16, 44, 18, &percentage(gpu.usage), 1, TEXT);
+        painter.bar(38, y + 23, 78, 8, gpu.usage, GPU_COLOR);
+        painter.text(
+            4,
+            y + 33,
+            WIDTH - 8,
+            16,
+            gpu.name.strip_prefix("NVIDIA ").unwrap_or(&gpu.name),
+            2,
+            GPU_COLOR,
+        );
+        let memory = gpu
             .used
             .zip(gpu.total)
-            .map(|(u, t)| u as f64 * 100.0 / t as f64);
-        painter.bar(16, y + 105, WIDTH - 32, 6, percent, GPU_COLOR);
+            .map(|(used, total)| (used, total.saturating_sub(used), total));
+        painter.memory(y + 49, "VRAM", memory, GPU_COLOR);
     }
     if app.snapshot.gpus.is_empty() {
-        painter.text(16, gpu_start, WIDTH - 32, 24, "GPU: starting...", 1, MUTED);
+        painter.icon(4, gpu_start, 28, app.logos.0[2]);
+        painter.text(38, gpu_start, 98, 18, "GPU Usage", 0, TEXT);
+        painter.text(38, gpu_start + 18, 98, 18, "N/A", 1, MUTED);
     }
-    let status = if app.snapshot.sampled_at.is_none() {
-        "STARTING"
-    } else if app
-        .snapshot
-        .sampled_at
-        .is_some_and(|t| t.elapsed() > Duration::from_secs(3))
-    {
-        "STALE"
-    } else if app.snapshot.cpu_error.is_some()
-        || app.snapshot.ram.is_none()
-        || app.snapshot.gpus.iter().any(|g| g.error.is_some())
-    {
-        "PARTIAL · N/A"
-    } else {
-        "LIVE · 1 SEC"
-    };
-    painter.text(
-        16,
-        app.content_height - 25,
-        WIDTH - 32,
-        18,
-        &format!("{status}   ·   drag / right-click"),
-        2,
-        MUTED,
-    );
     if app.content_height > app.height {
         let track = app.height - 12;
         let thumb = (track * app.height / app.content_height).max(16);
@@ -689,9 +854,34 @@ impl Painter {
             );
         }
     }
-    fn value(&mut self, y: i32, value: Option<f64>, color: u32) {
-        let value = value.map_or("N/A".into(), |v| format!("{v:.0}%"));
-        self.text(WIDTH - 68, y, 52, 24, &value, 1, color);
+    fn icon(&mut self, x: i32, y: i32, size: i32, icon: HICON) {
+        // SAFETY: owned icon sized for this DPI and live paint DC.
+        unsafe {
+            DrawIconEx(
+                self.dc,
+                scale(x, self.dpi),
+                scale(y - self.offset, self.dpi),
+                icon,
+                scale(size, self.dpi),
+                scale(size, self.dpi),
+                0,
+                null_mut(),
+                DI_NORMAL,
+            );
+        }
+    }
+    fn memory(&mut self, y: i32, label: &str, memory: Option<(u64, u64, u64)>, color: u32) {
+        for (x, title) in [(6, "Used"), (62, "Avail"), (118, "Total")] {
+            self.text(x, y, 48, 14, title, 2, MUTED);
+        }
+        let values = memory.map(|m| [m.0, m.1, m.2]);
+        for (i, x) in [6, 62, 118].into_iter().enumerate() {
+            let text = values.map_or("N/A".into(), |v| format!("{:.1}G", gib(v[i])));
+            self.text(x, y + 14, 48, 16, &text, 1, TEXT);
+        }
+        self.text(4, y + 32, 33, 16, label, 2, MUTED);
+        let usage = memory.and_then(|(u, _, t)| (t > 0).then_some(u as f64 * 100.0 / t as f64));
+        self.bar(40, y + 36, WIDTH - 46, 8, usage, color);
     }
     fn bar(&mut self, x: i32, y: i32, width: i32, height: i32, value: Option<f64>, color: u32) {
         self.rect(x, y, width, height, TRACK);
@@ -714,4 +904,8 @@ fn gib(bytes: u64) -> f64 {
 }
 fn last_error(operation: &str) -> String {
     format!("{operation}: {}", std::io::Error::last_os_error())
+}
+
+fn percentage(value: Option<f64>) -> String {
+    value.map_or("N/A".into(), |v| format!("{v:.0}%"))
 }

@@ -34,6 +34,7 @@ impl MemoryReading {
 pub struct Snapshot {
     pub cpu_name: String,
     pub cpu_total: Option<f64>,
+    pub physical_cpus: Vec<LogicalCpu>,
     pub cpus: Vec<LogicalCpu>,
     pub cpu_error: Option<String>,
     pub ram: Option<MemoryReading>,
@@ -45,6 +46,7 @@ impl Default for Snapshot {
         Self {
             cpu_name: "Starting...".into(),
             cpu_total: None,
+            physical_cpus: Vec::new(),
             cpus: Vec::new(),
             cpu_error: None,
             ram: None,
@@ -58,6 +60,7 @@ pub struct Sampler {
     cpu: Result<Cpu, String>,
     gpu: Result<Nvml, String>,
     cpu_name: String,
+    topology: crate::topology::Topology,
 }
 impl Sampler {
     pub fn new() -> Self {
@@ -65,6 +68,7 @@ impl Sampler {
             cpu: Cpu::new(),
             gpu: Nvml::new(),
             cpu_name: cpu_name(),
+            topology: crate::topology::Topology::new(),
         }
     }
     pub fn sample(&mut self) -> Snapshot {
@@ -77,6 +81,7 @@ impl Sampler {
             Err(error) => vec![GpuReading::unavailable(error.clone())],
         };
         Snapshot {
+            physical_cpus: self.topology.physical(&cpus),
             cpu_name: self.cpu_name.clone(),
             cpu_total,
             cpus,

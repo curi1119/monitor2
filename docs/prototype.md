@@ -1,6 +1,6 @@
 # 初版試作
 
-2026-10-01時点のWindows native試作です。
+初版コミット7562c14時点のWindows native試作の記録です。現在の改修内容は[phases.md](phases.md)、使用方法は[settings.md](settings.md)を参照してください。
 README.mdの整備は後で行います。
 
 ## 実装した機能
