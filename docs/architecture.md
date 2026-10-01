@@ -5,6 +5,7 @@
 | ファイル | 役割 |
 |---|---|
 | src/main.rs | 引数、起動、共有状態、監視スレッド、終了待ち |
+| src/instance.rs | ユーザーごとのファイルロックによる二重起動防止 |
 | src/hardware.rs | Snapshot、CPUのPDH、RAM、CPU名、Sampler |
 | src/topology.rs | 物理コアと論理CPUの対応、SMT集計 |
 | src/nvml.rs | NVMLの動的ロード・ABI、GPU値、ライブラリ寿命 |

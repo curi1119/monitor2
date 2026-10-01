@@ -4,6 +4,7 @@
 compile_error!("monitor2 requires Windows");
 
 mod hardware;
+mod instance;
 mod nvml;
 mod settings;
 mod settings_ui;
@@ -57,6 +58,14 @@ fn probe() -> Result<(), String> {
 }
 
 fn run(smoke_test: bool, preview: bool) -> Result<(), String> {
+    let _instance = if smoke_test {
+        None
+    } else {
+        let Some(guard) = instance::InstanceGuard::acquire()? else {
+            return Ok(());
+        };
+        Some(guard)
+    };
     let latest = Arc::new(Mutex::new(Snapshot::default()));
     let settings = Arc::new(settings::SharedSettings::new(settings::Settings::load()?));
     let worker_latest = Arc::clone(&latest);

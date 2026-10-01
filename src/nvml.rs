@@ -68,6 +68,7 @@ impl Drop for Library {
 struct Gpu {
     handle: Device,
     name: String,
+    error: Option<String>,
 }
 pub struct Nvml {
     _library: Library,
@@ -115,28 +116,7 @@ impl Nvml {
         };
         let mut device_count = 0;
         check(unsafe { count(&mut device_count) }, "NVML enumerate")?;
-        for index in 0..device_count {
-            let mut device = null_mut();
-            check(unsafe { handle(index, &mut device) }, "NVML device handle")?;
-            if device.is_null() {
-                return Err("NVML returned a null device".into());
-            }
-            let mut buffer = [0 as c_char; 96];
-            let status = unsafe { name(device, buffer.as_mut_ptr(), buffer.len() as u32) };
-            buffer[95] = 0;
-            let gpu_name = if status == 0 {
-                // SAFETY: buffer is guaranteed terminated, even for an unexpected DLL response.
-                unsafe { CStr::from_ptr(buffer.as_ptr()) }
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                format!("NVIDIA GPU {index}")
-            };
-            nvml.devices.push(Gpu {
-                handle: device,
-                name: gpu_name,
-            });
-        }
+        nvml.devices = enumerate_devices(device_count, handle, name);
         if nvml.devices.is_empty() {
             return Err("No NVIDIA GPU detected".into());
         }
@@ -146,6 +126,11 @@ impl Nvml {
         self.devices
             .iter()
             .map(|gpu| {
+                if let Some(error) = &gpu.error {
+                    let mut reading = GpuReading::unavailable(error.clone());
+                    reading.name = gpu.name.clone();
+                    return reading;
+                }
                 let mut utilization = UtilizationRaw::default();
                 let mut memory = MemoryRaw::default();
                 let mut temperature = 0;
@@ -180,6 +165,44 @@ impl Nvml {
             .collect()
     }
 }
+fn enumerate_devices(count: u32, handle: Handle, name: Name) -> Vec<Gpu> {
+    (0..count)
+        .map(|index| {
+            let mut device = null_mut();
+            // SAFETY: caller supplies validated NVML exports; device output and name buffer are live.
+            let status = unsafe { handle(index, &mut device) };
+            let fallback = format!("NVIDIA GPU {index}");
+            if status != 0 || device.is_null() {
+                return Gpu {
+                    handle: null_mut(),
+                    name: fallback,
+                    error: Some(if status != 0 {
+                        format!("NVML device {index} handle: NVML {status}")
+                    } else {
+                        format!("NVML device {index} returned a null handle")
+                    }),
+                };
+            }
+            let mut buffer = [0 as c_char; 96];
+            let status = unsafe { name(device, buffer.as_mut_ptr(), buffer.len() as u32) };
+            buffer[95] = 0;
+            let gpu_name = if status == 0 {
+                // SAFETY: the buffer is terminated even if the DLL response was unexpected.
+                unsafe { CStr::from_ptr(buffer.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                fallback
+            };
+            Gpu {
+                handle: device,
+                name: gpu_name,
+                error: None,
+            }
+        })
+        .collect()
+}
+
 impl Drop for Nvml {
     fn drop(&mut self) {
         // SAFETY: one successful initialization is paired with one shutdown before unloading.
@@ -193,5 +216,37 @@ fn check(status: u32, operation: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("{operation}: NVML {status}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    unsafe extern "C" fn mock_handle(index: u32, output: *mut Device) -> u32 {
+        if index == 0 {
+            return 4;
+        } // NVML_ERROR_NO_PERMISSION
+        unsafe {
+            *output = std::ptr::dangling_mut::<u8>().cast();
+        }
+        0
+    }
+    unsafe extern "C" fn mock_name(_: Device, output: *mut c_char, capacity: u32) -> u32 {
+        let text = b"Working GPU\0";
+        assert!(capacity as usize >= text.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr().cast(), output, text.len());
+        }
+        0
+    }
+    #[test]
+    fn inaccessible_device_does_not_discard_healthy_devices() {
+        let devices = enumerate_devices(2, mock_handle, mock_name);
+        assert_eq!(devices.len(), 2);
+        assert!(devices[0].error.as_ref().unwrap().contains("NVML 4"));
+        assert!(devices[0].handle.is_null());
+        assert_eq!(devices[1].name, "Working GPU");
+        assert!(devices[1].error.is_none());
+        assert!(!devices[1].handle.is_null());
     }
 }

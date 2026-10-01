@@ -3,7 +3,7 @@ use std::{
     mem::size_of,
     ptr::{null, null_mut},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use windows_sys::{
     Win32::{
@@ -16,6 +16,7 @@ use windows_sys::{
 };
 
 const TIMER: usize = 1;
+const SMOKE_TIMER: usize = 2;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
 const WIDTH: i32 = 140;
 const CORE_TOP: i32 = 94;
@@ -225,6 +226,7 @@ struct App {
     gdi: GdiObjects,
     dpi: u32,
     scroll: i32,
+    wheel_remainder: i32,
     content_height: i32,
     window_shape: (i32, i32, u32),
     height: i32,
@@ -235,7 +237,7 @@ struct App {
     logos: Logos,
     tray: NOTIFYICONDATAW,
     taskbar_message: u32,
-    smoke_deadline: Option<Instant>,
+    smoke_test: bool,
 }
 
 pub fn run(
@@ -258,6 +260,7 @@ pub fn run(
         gdi: GdiObjects::new(dpi)?,
         dpi,
         scroll: 0,
+        wheel_remainder: 0,
         content_height: INITIAL_HEIGHT,
         window_shape: (0, 0, 0),
         height: INITIAL_HEIGHT,
@@ -268,7 +271,7 @@ pub fn run(
         logos: Logos::new(dpi)?,
         tray: NOTIFYICONDATAW::default(),
         taskbar_message: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
-        smoke_deadline: smoke_test.then(|| Instant::now() + Duration::from_secs(6)),
+        smoke_test,
     });
     let instance = unsafe { GetModuleHandleW(null()) };
     let class = WNDCLASSW {
@@ -330,7 +333,9 @@ pub fn run(
     app.tray.szTip[..tooltip.len()].copy_from_slice(&tooltip);
     unsafe {
         Shell_NotifyIconW(NIM_ADD, &app.tray);
-        if SetTimer(hwnd, TIMER, app.preferences.interval_ms, None) == 0 {
+        if SetTimer(hwnd, TIMER, app.preferences.interval_ms, None) == 0
+            || (smoke_test && SetTimer(hwnd, SMOKE_TIMER, 6000, None) == 0)
+        {
             DestroyWindow(hwnd);
             UnregisterClassW(class.lpszClassName, instance);
             return Err(last_error("SetTimer"));
@@ -388,20 +393,16 @@ unsafe extern "system" fn window_proc(
     // SAFETY: only this UI thread accesses App; callbacks do not retain references.
     // Avoid synchronous message-producing APIs while a mutable App reference is active.
     match message {
-        WM_TIMER => {
-            let stop = unsafe {
-                (*pointer)
-                    .smoke_deadline
-                    .is_some_and(|d| Instant::now() >= d)
-            };
-            if stop {
-                unsafe {
-                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                }
-            } else {
-                unsafe {
-                    refresh(hwnd, pointer);
-                }
+        WM_TIMER if wparam == SMOKE_TIMER => {
+            unsafe {
+                KillTimer(hwnd, SMOKE_TIMER);
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
+            0
+        }
+        WM_TIMER if wparam == TIMER => {
+            unsafe {
+                refresh(hwnd, pointer);
             }
             0
         }
@@ -473,8 +474,9 @@ unsafe extern "system" fn window_proc(
             let delta = ((wparam >> 16) as u16) as i16 as i32;
             unsafe {
                 let app = &mut *pointer;
-                app.scroll = (app.scroll - delta / 120 * 48)
-                    .clamp(0, (app.content_height - app.height).max(0));
+                let steps = wheel_steps(&mut app.wheel_remainder, delta);
+                app.scroll =
+                    (app.scroll - steps * 48).clamp(0, (app.content_height - app.height).max(0));
                 InvalidateRect(hwnd, null(), 0);
             }
             0
@@ -530,6 +532,7 @@ unsafe extern "system" fn window_proc(
                     DestroyWindow(dialog);
                 }
                 KillTimer(hwnd, TIMER);
+                KillTimer(hwnd, SMOKE_TIMER);
                 Shell_NotifyIconW(NIM_DELETE, &(*pointer).tray);
                 PostQuitMessage(0);
             }
@@ -674,6 +677,10 @@ unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
     }
 }
 unsafe fn menu(hwnd: HWND, pointer: *mut App) {
+    // A diagnostic smoke run must not open an editor beside the normal instance.
+    if unsafe { (*pointer).smoke_test } {
+        return;
+    }
     let menu = unsafe { CreatePopupMenu() };
     if menu.is_null() {
         return;
@@ -762,6 +769,10 @@ fn paint(hwnd: HWND, app: &mut App) {
     painter.panel(0);
     let cpus = displayed_cpus(app);
     let rows = core_rows(cpus.len());
+    let usage_width = painter.percentage_width(3).max(28);
+    let usage_x = WIDTH - 2 - usage_width;
+    let usage_bar_width = usage_x - 38 - 2;
+    let core_percent_width = painter.percentage_width(2).max(21);
     let logo = if app.snapshot.cpu_name.to_ascii_lowercase().contains("intel") {
         app.logos.0[0]
     } else {
@@ -770,15 +781,22 @@ fn paint(hwnd: HWND, app: &mut App) {
     painter.icon(4, 4, 28, logo);
     painter.text(40, 3, 94, 16, "CPU Usage", 0, TEXT);
     painter.text(
-        110,
+        usage_x,
         18,
-        28,
+        usage_width,
         14,
         &percentage(app.snapshot.cpu_total),
         3,
         TEXT,
     );
-    painter.bar(38, 24, 68, 6, app.snapshot.cpu_total, CORE_SHADES[0]);
+    painter.bar(
+        38,
+        24,
+        usage_bar_width,
+        6,
+        app.snapshot.cpu_total,
+        CORE_SHADES[0],
+    );
     let cpu_name = app.snapshot.cpu_name.trim_end_matches(" Processor");
     let cpu_name = cpu_name
         .rsplit_once(' ')
@@ -815,7 +833,7 @@ fn paint(hwnd: HWND, app: &mut App) {
             painter.text(x, y, 16, CORE_ROW, &format!("{:02}", cpu.index), 2, MUTED);
         }
         let percent_width = if app.preferences.show_core_percent {
-            21
+            core_percent_width
         } else {
             0
         };
@@ -855,8 +873,16 @@ fn paint(hwnd: HWND, app: &mut App) {
             3,
             TEMPERATURE,
         );
-        painter.text(110, y + 19, 28, 14, &percentage(gpu.usage), 3, TEXT);
-        painter.bar(38, y + 24, 68, 6, gpu.usage, GPU_SHADES);
+        painter.text(
+            usage_x,
+            y + 19,
+            usage_width,
+            14,
+            &percentage(gpu.usage),
+            3,
+            TEXT,
+        );
+        painter.bar(38, y + 24, usage_bar_width, 6, gpu.usage, GPU_SHADES);
         painter.text(
             4,
             y + 36,
@@ -903,6 +929,21 @@ struct Painter {
     fonts: [HFONT; 4],
 }
 impl Painter {
+    fn percentage_width(&mut self, font: usize) -> i32 {
+        let mut size = SIZE::default();
+        // SAFETY: select a live owned font into the paint DC and restore its old font.
+        let measured = unsafe {
+            let old = SelectObject(self.dc, self.fonts[font]);
+            let ok = GetTextExtentPoint32W(self.dc, w!("100%"), 4, &mut size);
+            SelectObject(self.dc, old);
+            ok != 0
+        };
+        if measured {
+            (size.cx * 96 + self.dpi as i32 - 1) / self.dpi as i32 + 1
+        } else {
+            32
+        }
+    }
     fn frame(&mut self, y: i32, height: i32) {
         let diameter = scale(CORNER_DIAMETER, self.dpi);
         // SAFETY: stock objects are borrowed. Restore both selections after drawing;
@@ -1048,4 +1089,67 @@ fn last_error(operation: &str) -> String {
 
 fn percentage(value: Option<f64>) -> String {
     value.map_or("N/A".into(), |v| format!("{v:.0}%"))
+}
+
+fn wheel_steps(remainder: &mut i32, delta: i32) -> i32 {
+    *remainder += delta;
+    let steps = *remainder / 120;
+    *remainder %= 120;
+    steps
+}
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    #[test]
+    fn fractional_wheel_input_accumulates_in_both_directions() {
+        let mut remainder = 0;
+        assert_eq!(wheel_steps(&mut remainder, 60), 0);
+        assert_eq!(wheel_steps(&mut remainder, 60), 1);
+        assert_eq!(wheel_steps(&mut remainder, -30), 0);
+        assert_eq!(wheel_steps(&mut remainder, -90), -1);
+        assert_eq!(remainder, 0);
+        assert_eq!(wheel_steps(&mut remainder, 60), 0);
+        assert_eq!(wheel_steps(&mut remainder, -60), 0);
+        assert_eq!(remainder, 0);
+    }
+    #[test]
+    fn percentages_fit_at_common_dpi_scales() {
+        for dpi in [96, 120, 144, 192] {
+            let mut objects = GdiObjects::new(dpi).unwrap();
+            // SAFETY: private owned compatible DC, released by GdiObjects on scope exit.
+            objects.dc = unsafe { CreateCompatibleDC(null_mut()) };
+            assert!(!objects.dc.is_null());
+            let mut painter = Painter {
+                dc: objects.dc,
+                dpi,
+                offset: 0,
+                fonts: objects.fonts,
+            };
+            for font in [2, 3] {
+                let width = painter.percentage_width(font);
+                for text in ["100%", "N/A"] {
+                    let wide = wide(text);
+                    let mut size = SIZE::default();
+                    unsafe {
+                        let old = SelectObject(objects.dc, objects.fonts[font]);
+                        assert_ne!(
+                            GetTextExtentPoint32W(
+                                objects.dc,
+                                wide.as_ptr(),
+                                (wide.len() - 1) as i32,
+                                &mut size
+                            ),
+                            0
+                        );
+                        SelectObject(objects.dc, old);
+                    }
+                    assert!(
+                        scale(width, dpi) >= size.cx,
+                        "dpi={dpi}, font={font}, text={text}"
+                    );
+                }
+                assert!(width < 64 - 16 - 1, "core bar still has room at {dpi} DPI");
+            }
+        }
+    }
 }

@@ -24,7 +24,7 @@ const CORES: i32 = 104;
 const PERCENT: i32 = 105;
 const NUMBERS: i32 = 106;
 const SAVE: usize = 201;
-const CANCEL: usize = 202;
+const CANCEL: usize = IDCANCEL as usize;
 struct Dialog {
     shared: Arc<SharedSettings>,
     owner: HWND,
