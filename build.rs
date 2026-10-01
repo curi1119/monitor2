@@ -24,20 +24,47 @@ fn main() {
             .replace("<svg ", &format!("<svg fill=\"{color}\" "));
         let tree =
             resvg::usvg::Tree::from_data(svg.as_bytes(), &resvg::usvg::Options::default()).unwrap();
-        // Render each common DPI size directly from SVG, avoiding resampling at runtime.
+        // Supersample each DPI size at build time; runtime still draws at its exact size.
         let sizes = [28u32, 35, 42, 49, 56, 63, 70, 84, 112];
         let images: Vec<_> = sizes
             .iter()
             .map(|&size| {
-                let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+                const SAMPLES: u32 = 4;
+                let large_size = size * SAMPLES;
+                let mut large = resvg::tiny_skia::Pixmap::new(large_size, large_size).unwrap();
+                // Composite onto an opaque navy plate before filtering. This avoids
+                // transparent edge pixels depending on the window background.
+                large.fill(resvg::tiny_skia::Color::from_rgba8(0x10, 0x1B, 0x2C, 255));
                 resvg::render(
                     &tree,
                     resvg::tiny_skia::Transform::from_scale(
-                        size as f32 / tree.size().width(),
-                        size as f32 / tree.size().height(),
+                        large_size as f32 / tree.size().width(),
+                        large_size as f32 / tree.size().height(),
                     ),
-                    &mut pixmap.as_mut(),
+                    &mut large.as_mut(),
                 );
+                let mut pixmap = resvg::tiny_skia::Pixmap::new(size, size).unwrap();
+                // Exact area average of each 4x4 block. All channels are premultiplied
+                // and the background is opaque, so no alpha unpremultiplication is needed.
+                for y in 0..size {
+                    for x in 0..size {
+                        let mut sum = [0u32; 4];
+                        for sy in 0..SAMPLES {
+                            for sx in 0..SAMPLES {
+                                let offset = (((y * SAMPLES + sy) * large_size + x * SAMPLES + sx)
+                                    * 4) as usize;
+                                for (channel, total) in sum.iter_mut().enumerate() {
+                                    *total += large.data()[offset + channel] as u32;
+                                }
+                            }
+                        }
+                        let offset = ((y * size + x) * 4) as usize;
+                        for (channel, total) in sum.into_iter().enumerate() {
+                            pixmap.data_mut()[offset + channel] =
+                                ((total + SAMPLES * SAMPLES / 2) / (SAMPLES * SAMPLES)) as u8;
+                        }
+                    }
+                }
                 pixmap.encode_png().unwrap()
             })
             .collect();

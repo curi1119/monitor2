@@ -17,14 +17,47 @@ use windows_sys::{
 
 const TIMER: usize = 1;
 const TRAY_MESSAGE: u32 = WM_APP + 1;
-const WIDTH: i32 = 172;
-const BG: u32 = 0x00211A16;
-const TEXT: u32 = 0x00F3EDE5;
-const MUTED: u32 = 0x00AD9B8A;
-const CPU_COLOR: u32 = 0x00EAC879;
-const RAM_COLOR: u32 = 0x00E1AFA7;
-const GPU_COLOR: u32 = 0x00AEDC9D;
-const TRACK: u32 = 0x003E3228;
+const WIDTH: i32 = 140;
+const CORE_TOP: i32 = 94;
+const CORE_ROW: i32 = 10;
+const GPU_PANEL_HEIGHT: i32 = 96;
+const INITIAL_HEIGHT: i32 = 280;
+const CORNER_DIAMETER: i32 = 6;
+// RGB literals are converted to GDI's COLORREF (0x00BBGGRR).
+const fn rgb(value: u32) -> u32 {
+    ((value & 0xff) << 16) | (value & 0xff00) | ((value >> 16) & 0xff)
+}
+const BG: u32 = rgb(0x021326);
+const PANEL_TOP: u32 = rgb(0x071F47);
+const TEXT: u32 = rgb(0xFFFFFF);
+const BORDER: u32 = rgb(0x656566);
+const MUTED: u32 = rgb(0xF0F8FF);
+const CPU_NAME: u32 = rgb(0xFFD700);
+const GPU_NAME: u32 = rgb(0x00FA9A);
+const TEMPERATURE: u32 = rgb(0xFFC0CB);
+const TRACK: u32 = rgb(0x5F5F5F);
+const TRACK_SHADES: [u32; 2] = [rgb(0x5F5F5F), rgb(0x414141)];
+const MEMORY_SHADES: [u32; 2] = [rgb(0x3399CC), rgb(0x1387B4)];
+const GPU_SHADES: [u32; 2] = [rgb(0x009900), rgb(0x008700)];
+// The legacy monitor's core colors, with bright upper and darker lower halves.
+const CORE_SHADES: [[u32; 2]; 16] = [
+    [rgb(0x66B3FF), rgb(0x1B71FE)],
+    [rgb(0x00E3E3), rgb(0x00B6B6)],
+    [rgb(0x6FE499), rgb(0x28BE45)],
+    [rgb(0xFFE666), rgb(0xFEB322)],
+    [rgb(0xFDA853), rgb(0xDC6C2C)],
+    [rgb(0xF65051), rgb(0xBE2A2C)],
+    [rgb(0xFC45D0), rgb(0xD9009D)],
+    [rgb(0xCC66CC), rgb(0xA329A3)],
+    [rgb(0x0066FF), rgb(0x0052CC)],
+    MEMORY_SHADES,
+    GPU_SHADES,
+    [rgb(0x99CC00), rgb(0x989E00)],
+    [rgb(0xCC6633), rgb(0xB2411B)],
+    [rgb(0xCC0033), rgb(0x9E001C)],
+    [rgb(0xCC00CC), rgb(0xB0009A)],
+    [rgb(0xC35DD5), rgb(0xAD3AC7)],
+];
 
 pub fn show_error(error: &str) {
     let message = wide(error);
@@ -40,7 +73,7 @@ pub fn show_error(error: &str) {
 }
 
 struct GdiObjects {
-    fonts: [HFONT; 3],
+    fonts: [HFONT; 4],
     dc: HDC,
     bitmap: HBITMAP,
     old_bitmap: HGDIOBJ,
@@ -50,7 +83,7 @@ struct GdiObjects {
 impl GdiObjects {
     fn new(dpi: u32) -> Result<Self, String> {
         let mut objects = Self {
-            fonts: [null_mut(); 3],
+            fonts: [null_mut(); 4],
             dc: null_mut(),
             bitmap: null_mut(),
             old_bitmap: null_mut(),
@@ -69,7 +102,10 @@ impl GdiObjects {
                 *font = null_mut();
             }
         }
-        for (i, (size, weight)) in [(13, 600), (12, 500), (11, 400)].into_iter().enumerate() {
+        for (i, (size, weight)) in [(12, 600), (10, 500), (9, 400), (11, 700)]
+            .into_iter()
+            .enumerate()
+        {
             // SAFETY: create owned GDI objects; sizes are scaled to the window DPI.
             self.fonts[i] = unsafe {
                 CreateFontW(
@@ -190,6 +226,7 @@ struct App {
     dpi: u32,
     scroll: i32,
     content_height: i32,
+    window_shape: (i32, i32, u32),
     height: i32,
     topmost: bool,
     settings: Arc<crate::settings::SharedSettings>,
@@ -221,8 +258,9 @@ pub fn run(
         gdi: GdiObjects::new(dpi)?,
         dpi,
         scroll: 0,
-        content_height: 320,
-        height: 320,
+        content_height: INITIAL_HEIGHT,
+        window_shape: (0, 0, 0),
+        height: INITIAL_HEIGHT,
         topmost: preferences.topmost,
         settings,
         preferences,
@@ -258,7 +296,7 @@ pub fn run(
             40,
             80,
             scale(WIDTH, dpi),
-            scale(320, dpi),
+            scale(INITIAL_HEIGHT, dpi),
             null_mut(),
             null_mut(),
             instance,
@@ -278,6 +316,9 @@ pub fn run(
             UnregisterClassW(class.lpszClassName, instance);
         }
         return Err(error);
+    }
+    unsafe {
+        update_window_shape(hwnd, &mut *app);
     }
     app.tray.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
     app.tray.hWnd = hwnd;
@@ -371,6 +412,12 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_ERASEBKGND => 1,
+        WM_SIZE => {
+            unsafe {
+                update_window_shape(hwnd, pointer);
+            }
+            0
+        }
         WM_LBUTTONDOWN => {
             unsafe {
                 windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
@@ -505,6 +552,38 @@ unsafe extern "system" fn window_proc(
     }
 }
 
+unsafe fn update_window_shape(hwnd: HWND, pointer: *mut App) {
+    let mut rect = RECT::default();
+    // SAFETY: this is our live borderless window; its client and window origins match.
+    if unsafe { GetClientRect(hwnd, &mut rect) } == 0 {
+        return;
+    }
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    let shape = (rect.right, rect.bottom, dpi);
+    if rect.right <= 0 || rect.bottom <= 0 || unsafe { (*pointer).window_shape } == shape {
+        return;
+    }
+    let diameter = scale(CORNER_DIAMETER, dpi);
+    let region =
+        unsafe { CreateRoundRectRgn(0, 0, rect.right + 1, rect.bottom + 1, diameter, diameter) };
+    if region.is_null() {
+        eprintln!("{}", last_error("CreateRoundRectRgn"));
+        return;
+    }
+    // Record before SetWindowRgn, which can synchronously send window-position messages.
+    // No App reference is held over that call. Success transfers region ownership to Windows.
+    unsafe {
+        (*pointer).window_shape = shape;
+    }
+    if unsafe { SetWindowRgn(hwnd, region, 1) } == 0 {
+        eprintln!("{}", last_error("SetWindowRgn"));
+        unsafe {
+            (*pointer).window_shape = (0, 0, 0);
+            DeleteObject(region.cast());
+        }
+    }
+}
+
 unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
     let (resized, height, dpi) = {
         // SAFETY: caller passes the UI-thread App that lives through the message loop.
@@ -557,7 +636,8 @@ unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
 
         let cpus = displayed_cpus(app);
         let rows = core_rows(cpus.len());
-        app.content_height = 112 + rows * 13 + app.snapshot.gpus.len().max(1) as i32 * 104;
+        app.content_height =
+            104 + rows * CORE_ROW + app.snapshot.gpus.len().max(1) as i32 * GPU_PANEL_HEIGHT;
         let mut info = MONITORINFO {
             cbSize: size_of::<MONITORINFO>() as u32,
             ..Default::default()
@@ -679,6 +759,7 @@ fn paint(hwnd: HWND, app: &mut App) {
         fonts: app.gdi.fonts,
     };
     painter.rect(0, app.scroll, WIDTH, app.height, BG);
+    painter.panel(0);
     let cpus = displayed_cpus(app);
     let rows = core_rows(cpus.len());
     let logo = if app.snapshot.cpu_name.to_ascii_lowercase().contains("intel") {
@@ -687,30 +768,30 @@ fn paint(hwnd: HWND, app: &mut App) {
         app.logos.0[1]
     };
     painter.icon(4, 4, 28, logo);
-    painter.text(38, 2, 98, 18, "CPU Usage", 0, TEXT);
+    painter.text(40, 3, 94, 16, "CPU Usage", 0, TEXT);
     painter.text(
-        124,
-        16,
-        44,
+        110,
         18,
+        28,
+        14,
         &percentage(app.snapshot.cpu_total),
-        1,
+        3,
         TEXT,
     );
-    painter.bar(38, 23, 78, 8, app.snapshot.cpu_total, CPU_COLOR);
+    painter.bar(38, 24, 68, 6, app.snapshot.cpu_total, CORE_SHADES[0]);
     let cpu_name = app.snapshot.cpu_name.trim_end_matches(" Processor");
     let cpu_name = cpu_name
         .rsplit_once(' ')
         .filter(|(_, suffix)| suffix.ends_with("-Core"))
         .map_or(cpu_name, |(model, _)| model);
-    painter.text(4, 33, WIDTH - 8, 16, cpu_name, 2, CPU_COLOR);
+    painter.text(4, 36, WIDTH - 8, 12, cpu_name, 2, CPU_NAME);
     painter.memory(
-        49,
+        48,
         "RAM",
         app.snapshot.ram.map(|m| (m.used(), m.available, m.total)),
-        RAM_COLOR,
+        MEMORY_SHADES,
     );
-    painter.rect(6, 97, WIDTH - 12, 1, TRACK);
+    painter.rect(6, 90, WIDTH - 12, 1, TRACK);
     for (i, cpu) in cpus.iter().enumerate() {
         let column = if cpus.len() <= 8 {
             0
@@ -722,78 +803,90 @@ fn paint(hwnd: HWND, app: &mut App) {
         } else {
             i % rows as usize
         };
-        let x = 4 + column as i32 * 86;
-        let y = 101 + row as i32 * 13;
-        let width = if cpus.len() <= 8 { WIDTH - 8 } else { 78 };
+        let x = 4 + column as i32 * 68;
+        let y = CORE_TOP + row as i32 * CORE_ROW;
+        let width = if cpus.len() <= 8 { WIDTH - 8 } else { 64 };
         let number_width = if app.preferences.show_core_numbers {
-            20
+            16
         } else {
             0
         };
         if app.preferences.show_core_numbers {
-            painter.text(x, y, 20, 13, &format!("{:02}", cpu.index), 2, MUTED);
+            painter.text(x, y, 16, CORE_ROW, &format!("{:02}", cpu.index), 2, MUTED);
         }
         let percent_width = if app.preferences.show_core_percent {
-            30
+            21
         } else {
             0
         };
-        let bar_width = width - number_width - percent_width - 2;
-        let colors = [0x004C9AFF, 0x006DDDB1, 0x00FFB873, 0x00D795D8];
+        let bar_width = width - number_width - percent_width - 1;
         painter.bar(
             x + number_width,
-            y + 3,
+            y + 2,
             bar_width,
-            8,
+            6,
             cpu.usage,
-            colors[i % colors.len()],
+            CORE_SHADES[i % CORE_SHADES.len()],
         );
         if app.preferences.show_core_percent {
-            painter.text(x + width - 30, y, 30, 13, &percentage(cpu.usage), 2, TEXT);
+            painter.text(
+                x + width - percent_width,
+                y,
+                percent_width,
+                CORE_ROW,
+                &percentage(cpu.usage),
+                2,
+                TEXT,
+            );
         }
     }
-    let gpu_start = 108 + rows * 13;
+    let gpu_start = 104 + rows * CORE_ROW;
     for (i, gpu) in app.snapshot.gpus.iter().enumerate() {
-        let y = gpu_start + i as i32 * 104;
-        painter.rect(6, y - 5, WIDTH - 12, 1, TRACK);
-        painter.icon(4, y + 1, 28, app.logos.0[2]);
-        painter.text(38, y, 98, 18, "GPU Usage", 0, TEXT);
+        let y = gpu_start + i as i32 * GPU_PANEL_HEIGHT;
+        painter.panel(y);
+        painter.icon(4, y + 4, 28, app.logos.0[2]);
+        painter.text(40, y + 3, 74, 16, "GPU Usage", 0, TEXT);
         painter.text(
-            130,
-            y,
-            38,
-            16,
+            112,
+            y + 3,
+            24,
+            14,
             &gpu.temperature.map_or("N/A".into(), |t| format!("{t}°")),
-            2,
-            GPU_COLOR,
+            3,
+            TEMPERATURE,
         );
-        painter.text(124, y + 16, 44, 18, &percentage(gpu.usage), 1, TEXT);
-        painter.bar(38, y + 23, 78, 8, gpu.usage, GPU_COLOR);
+        painter.text(110, y + 19, 28, 14, &percentage(gpu.usage), 3, TEXT);
+        painter.bar(38, y + 24, 68, 6, gpu.usage, GPU_SHADES);
         painter.text(
             4,
-            y + 33,
+            y + 36,
             WIDTH - 8,
-            16,
+            12,
             gpu.name.strip_prefix("NVIDIA ").unwrap_or(&gpu.name),
             2,
-            GPU_COLOR,
+            GPU_NAME,
         );
         let memory = gpu
             .used
             .zip(gpu.total)
             .map(|(used, total)| (used, total.saturating_sub(used), total));
-        painter.memory(y + 49, "VRAM", memory, GPU_COLOR);
+        painter.memory(y + 48, "VRAM", memory, MEMORY_SHADES);
     }
     if app.snapshot.gpus.is_empty() {
-        painter.icon(4, gpu_start, 28, app.logos.0[2]);
-        painter.text(38, gpu_start, 98, 18, "GPU Usage", 0, TEXT);
-        painter.text(38, gpu_start + 18, 98, 18, "N/A", 1, MUTED);
+        painter.panel(gpu_start);
+        painter.icon(4, gpu_start + 4, 28, app.logos.0[2]);
+        painter.text(40, gpu_start + 3, 94, 16, "GPU Usage", 0, TEXT);
+        painter.text(40, gpu_start + 19, 94, 14, "N/A", 1, MUTED);
     }
     if app.content_height > app.height {
         let track = app.height - 12;
         let thumb = (track * app.height / app.content_height).max(16);
         let y = 6 + app.scroll * (track - thumb) / (app.content_height - app.height);
         painter.rect(WIDTH - 5, app.scroll + y, 2, thumb, MUTED);
+    }
+    painter.frame(0, gpu_start - 2);
+    for i in 0..app.snapshot.gpus.len().max(1) {
+        painter.frame(gpu_start + i as i32 * GPU_PANEL_HEIGHT, GPU_PANEL_HEIGHT);
     }
     unsafe {
         SelectObject(dc, old_font);
@@ -807,9 +900,30 @@ struct Painter {
     dc: HDC,
     dpi: u32,
     offset: i32,
-    fonts: [HFONT; 3],
+    fonts: [HFONT; 4],
 }
 impl Painter {
+    fn frame(&mut self, y: i32, height: i32) {
+        let diameter = scale(CORNER_DIAMETER, self.dpi);
+        // SAFETY: stock objects are borrowed. Restore both selections after drawing;
+        // the hollow brush preserves the already painted contents. DC_PEN is one device pixel.
+        unsafe {
+            let old_pen = SelectObject(self.dc, GetStockObject(DC_PEN));
+            let old_brush = SelectObject(self.dc, GetStockObject(HOLLOW_BRUSH));
+            SetDCPenColor(self.dc, BORDER);
+            RoundRect(
+                self.dc,
+                scale(1, self.dpi),
+                scale(y + 1 - self.offset, self.dpi),
+                scale(WIDTH - 1, self.dpi),
+                scale(y + height - 1 - self.offset, self.dpi),
+                diameter,
+                diameter,
+            );
+            SelectObject(self.dc, old_brush);
+            SelectObject(self.dc, old_pen);
+        }
+    }
     fn rect(&mut self, x: i32, y: i32, width: i32, height: i32, color: u32) {
         let rect = RECT {
             left: scale(x, self.dpi),
@@ -869,30 +983,56 @@ impl Painter {
                 DI_NORMAL,
             );
         }
+        let edge = rgb(0x3F4D63);
+        self.rect(x - 1, y - 1, size + 2, 1, edge);
+        self.rect(x - 1, y + size, size + 2, 1, edge);
+        self.rect(x - 1, y, 1, size, edge);
+        self.rect(x + size, y, 1, size, edge);
     }
-    fn memory(&mut self, y: i32, label: &str, memory: Option<(u64, u64, u64)>, color: u32) {
-        for (x, title) in [(6, "Used"), (62, "Avail"), (118, "Total")] {
-            self.text(x, y, 48, 14, title, 2, MUTED);
+    fn memory(&mut self, y: i32, label: &str, memory: Option<(u64, u64, u64)>, shades: [u32; 2]) {
+        for (x, title) in [(6, "Used"), (50, "Free"), (94, "Total")] {
+            self.text(x, y, 40, 11, title, 2, MUTED);
         }
         let values = memory.map(|m| [m.0, m.1, m.2]);
-        for (i, x) in [6, 62, 118].into_iter().enumerate() {
+        for (i, x) in [6, 50, 94].into_iter().enumerate() {
             let text = values.map_or("N/A".into(), |v| format!("{:.1}G", gib(v[i])));
-            self.text(x, y + 14, 48, 16, &text, 1, TEXT);
+            self.text(x, y + 11, 40, 12, &text, 1, TEXT);
         }
-        self.text(4, y + 32, 33, 16, label, 2, MUTED);
+        self.text(6, y + 24, 28, 12, label, 2, MUTED);
         let usage = memory.and_then(|(u, _, t)| (t > 0).then_some(u as f64 * 100.0 / t as f64));
-        self.bar(40, y + 36, WIDTH - 46, 8, usage, color);
+        self.bar(36, y + 28, WIDTH - 42, 6, usage, shades);
     }
-    fn bar(&mut self, x: i32, y: i32, width: i32, height: i32, value: Option<f64>, color: u32) {
-        self.rect(x, y, width, height, TRACK);
-        if let Some(value) = value {
-            self.rect(
-                x,
-                y,
-                (width as f64 * value.clamp(0.0, 100.0) / 100.0).round() as i32,
-                height,
-                color,
-            );
+    fn panel(&mut self, y: i32) {
+        // A small number of solid bands approximates the legacy navy gradient.
+        // No bitmap, brush, or per-pixel allocation is needed during painting.
+        for band in 0..16 {
+            let mut color = 0;
+            for shift in [0, 8, 16] {
+                let top = (PANEL_TOP >> shift) & 0xff;
+                let bottom = (BG >> shift) & 0xff;
+                color |= ((top * (15 - band) + bottom * band) / 15) << shift;
+            }
+            self.rect(0, y + band as i32 * 4, WIDTH, 4, color);
+        }
+    }
+    fn bar(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        value: Option<f64>,
+        shades: [u32; 2],
+    ) {
+        let upper = height / 2;
+        self.rect(x, y, width, upper, TRACK_SHADES[0]);
+        self.rect(x, y + upper, width, height - upper, TRACK_SHADES[1]);
+        if let Some(value) = value.filter(|value| value.is_finite()) {
+            let filled = (width as f64 * value.clamp(0.0, 100.0) / 100.0).round() as i32;
+            if filled > 0 {
+                self.rect(x, y, filled, upper, shades[0]);
+                self.rect(x, y + upper, filled, height - upper, shades[1]);
+            }
         }
     }
 }
