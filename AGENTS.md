@@ -20,7 +20,7 @@ monitor2はRust製のWindows専用CPU・RAM・NVIDIA GPUモニターです。軽
 | [改修履歴と検証](docs/phases.md) | 実装の経緯、実機確認済み・未検証の項目 |
 | [全体レビューの修正](docs/review-fixes.md) | f1027ecのレビュー指摘6件と修正・検証結果 |
 
-[初版試作](docs/prototype.md)と[HANDOFF.md](HANDOFF.md)は過去の記録です。そこでの候補・推奨案を現在の確定仕様と混同しないでください。
+[初版試作](docs/prototype.md)は過去の記録です。そこでの候補・推奨案を現在の確定仕様と混同しないでください。
 
 ## 共通方針
 
