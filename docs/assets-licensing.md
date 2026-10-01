@@ -35,3 +35,9 @@
 3. 企業ロゴを継続する場合は、対象用途の利用・再配布・色／形状の条件を確認し、必要な許諾を取得する。
 
 公開・配布を予定する場合は1と2を推奨します。今回の確認では画像やアプリの挙動は変更していません。外部コード・依存ライブラリのライセンス記録は[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)を参照してください。
+
+## 配布用文書の整理
+
+配布ZIPをEXE・LICENSE・readme.txtへ整理しました。CC0は帰属表記や全文添付を利用条件としておらず、[CC0全文](https://creativecommons.org/publicdomain/zero/1.0/legalcode)と[公式FAQ](https://wiki.creativecommons.org/wiki/CC0_FAQ)から、LICENSE-CC0.txtのZIPへの同梱は不要と判断しています。Simple IconsのDisclaimerは利用者に読むよう求める案内で、配布物への同梱条件は確認できません。両原文はリポジトリに残しています。
+
+この判断はSimple Iconsのコレクション文書の添付義務についてで、各企業ロゴの許諾・商標問題の解決ではありません。出典・商標帰属・未確認事項へのリンクは配布用readme.txtに残します。MicrosoftライブラリのMIT表記は全文を配布用LICENSEに統合して維持します。

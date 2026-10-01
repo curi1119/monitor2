@@ -69,7 +69,7 @@ cargo build --locked --release
 - Cargo.lockは追跡し、target/は生成物として除外します。依存変更を意図しないビルド・検証では--lockedを使います。
 - 文書は日本語。機能仕様は該当資料へ、実測値や実機検証は条件・対象版を添えて記録します。
 - [prototype.md](prototype.md)は初版コミット時点、[phases.md](phases.md)は改修の経緯です。現在の設計は[architecture.md](architecture.md)、[monitoring.md](monitoring.md)、[rendering.md](rendering.md)を更新してください。
-- README.mdはまだ作成しません。AI補助資料・個人用メモの配置とコミット許可のルールは[AGENTS.md](../AGENTS.md)に従います。
+- README.mdは利用者向けの概要・ダウンロード・基本操作を簡潔にまとめます。AI補助資料・個人用メモの配置とコミット許可のルールは[AGENTS.md](../AGENTS.md)に従います。
 - 秘密情報や個人環境の設定はGitに含めません。許可されたコミットでは差分と対象ファイルを確認し、短い目的のメッセージを付けます。
 
 CIと配布物の作成・公開は[ci.md](ci.md)にまとめています。

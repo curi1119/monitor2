@@ -2,10 +2,10 @@
 
 1. アイコン・UI（実装済み）: 旧版のアプリアイコン、Simple IconsのIntel／AMD／NVIDIAアイコンを組み込み。172 DIP幅、16論理CPU・GPU1台で320 DIP高（余白調整後）。常時の操作説明を削除。
 2. 設定（実装済み）: 最前面、ログイン時起動、更新間隔、物理／論理コア、コア使用率%の表示切り替え。保存後に反映。
-3. CI・リリース（ファイル追加・ローカル検証済み）: push／PRのWindowsビルド・テストと手動実行によるGitHub Release。リモート未設定のためGitHub上の実行確認は未実施。
+3. CI・リリース（CI実行確認済み）: push／PRのWindowsビルド・テストと手動実行によるGitHub Release。2026-10-01にmainを初回pushし、Windows CIの成功を確認。ユーザーが手動Releaseを実行し、v0.1.0作成とZIP・SHA256の確認も完了。結果は[ci.md](ci.md)を参照。
 4. CPU温度（延期）: ユーザーの指示で後回し。再開時はRust単体での取得を優先して調査する。調査候補のPawnIOは署名済みドライバー・センサーモジュールの導入条件とライセンス確認が必要。今回は依存追加・ドライバー導入を行っていない。
 
-コミットはユーザーの許可を待つ。README.mdはまだ作成しない。
+コミットはユーザーの許可を待つ。README.mdは利用者向けの概要・ダウンロード・基本操作と動作画面を掲載。
 
 実装と使い方は[settings.md](settings.md)、ビルド・公開手順は[ci.md](ci.md)、素材の条件は[../THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)を参照。
 
