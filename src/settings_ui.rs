@@ -24,6 +24,8 @@ const CORES: i32 = 104;
 const PERCENT: i32 = 105;
 const NUMBERS: i32 = 106;
 const THEME: i32 = 107;
+const DRAG: i32 = 108;
+const CLICK_THROUGH: i32 = 109;
 const SAVE: usize = 201;
 const CANCEL: usize = IDCANCEL as usize;
 struct Dialog {
@@ -52,7 +54,7 @@ pub fn open(owner: HWND, shared: Arc<SharedSettings>) -> Result<HWND, String> {
         left: 0,
         top: 0,
         right: s(360, dpi),
-        bottom: s(402, dpi),
+        bottom: s(466, dpi),
     };
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
     unsafe {
@@ -227,15 +229,39 @@ pub fn open(owner: HWND, shared: Arc<SharedSettings>) -> Result<HWND, String> {
             0,
         );
     }
+    let drag = child(
+        hwnd,
+        "BUTTON",
+        "Drag＆Dropを有効にする",
+        BS_AUTOCHECKBOX as u32,
+        20,
+        310,
+        320,
+        22,
+        DRAG,
+        dpi,
+    );
+    let click_through = child(
+        hwnd,
+        "BUTTON",
+        "左クリックスルーを有効にする",
+        BS_AUTOCHECKBOX as u32,
+        20,
+        338,
+        320,
+        22,
+        CLICK_THROUGH,
+        dpi,
+    );
     child(
         hwnd,
         "STATIC",
-        "設定は保存後すぐに反映されます。",
+        "クリックスルー有効時の移動: Ctrl＋左ドラッグ。\n設定は保存後すぐに反映されます。",
         0,
         20,
-        314,
+        378,
         320,
-        22,
+        36,
         0,
         dpi,
     );
@@ -245,7 +271,7 @@ pub fn open(owner: HWND, shared: Arc<SharedSettings>) -> Result<HWND, String> {
         "保存",
         BS_DEFPUSHBUTTON as u32,
         168,
-        360,
+        424,
         78,
         26,
         SAVE as i32,
@@ -257,7 +283,7 @@ pub fn open(owner: HWND, shared: Arc<SharedSettings>) -> Result<HWND, String> {
         "キャンセル",
         0,
         254,
-        360,
+        424,
         86,
         26,
         CANCEL as i32,
@@ -268,6 +294,13 @@ pub fn open(owner: HWND, shared: Arc<SharedSettings>) -> Result<HWND, String> {
         SendMessageW(start, BM_SETCHECK, value.autostart as usize, 0);
         SendMessageW(percent, BM_SETCHECK, value.show_core_percent as usize, 0);
         SendMessageW(numbers, BM_SETCHECK, value.show_core_numbers as usize, 0);
+        SendMessageW(drag, BM_SETCHECK, value.drag_enabled as usize, 0);
+        SendMessageW(
+            click_through,
+            BM_SETCHECK,
+            value.left_click_through as usize,
+            0,
+        );
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
     }
@@ -349,6 +382,8 @@ fn read(hwnd: HWND) -> Result<Settings, String> {
         show_core_numbers: checked(hwnd, NUMBERS),
         window_position: None, // SharedSettings::apply retains the current position.
         theme,
+        drag_enabled: checked(hwnd, DRAG),
+        left_click_through: checked(hwnd, CLICK_THROUGH),
     })
 }
 unsafe extern "system" fn proc(

@@ -1,5 +1,6 @@
 use crate::hardware::{Snapshot, wide};
 use crate::settings::Theme;
+mod input;
 #[cfg(test)]
 mod render_tests;
 mod themes;
@@ -220,6 +221,7 @@ struct App {
     tray: NOTIFYICONDATAW,
     taskbar_message: u32,
     smoke_test: bool,
+    mouse_hook: Option<input::MouseHook>,
 }
 
 pub fn run(
@@ -257,6 +259,7 @@ pub fn run(
         tray: NOTIFYICONDATAW::default(),
         taskbar_message: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
         smoke_test,
+        mouse_hook: None,
     });
     let instance = unsafe { GetModuleHandleW(null()) };
     let class = WNDCLASSW {
@@ -316,7 +319,13 @@ pub fn run(
             return Err(error);
         }
     }
-    if let Err(error) = apply_window_theme(hwnd, app.preferences.theme) {
+    if let Err(error) = apply_window_theme(
+        hwnd,
+        app.preferences.theme,
+        app.preferences.left_click_through,
+    )
+    .and_then(|()| configure_input(hwnd, &mut *app))
+    {
         unsafe {
             DestroyWindow(hwnd);
             UnregisterClassW(class.lpszClassName, instance);
@@ -434,10 +443,35 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_LBUTTONDOWN => {
+        WM_LBUTTONDOWN | input::BEGIN_DRAG => {
+            if message == input::BEGIN_DRAG
+                && unsafe {
+                    windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(
+                        windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_LBUTTON as i32,
+                    )
+                } >= 0
+            {
+                return 0;
+            }
+            if !unsafe { (*pointer).preferences.drag_enabled } {
+                return 0;
+            }
+            input::suspend(hwnd, true);
             unsafe {
+                let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !(WS_EX_TRANSPARENT as isize));
                 windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
                 SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+            }
+            input::suspend(hwnd, false);
+            let (theme, click_through) = unsafe {
+                (
+                    (*pointer).preferences.theme,
+                    (*pointer).preferences.left_click_through,
+                )
+            };
+            if let Err(error) = apply_window_theme(hwnd, theme, click_through) {
+                show_error(&error);
             }
             0
         }
@@ -466,14 +500,18 @@ unsafe extern "system" fn window_proc(
                     (*pointer).wheel_remainder = 0;
                     let theme = (*pointer).preferences.theme;
                     let dpi = (*pointer).dpi;
-                    if let Err(error) = (*pointer)
-                        .gdi
-                        .fonts_for_theme(dpi, theme)
-                        .and_then(|()| apply_window_theme(hwnd, theme))
-                    {
+                    if let Err(error) = (*pointer).gdi.fonts_for_theme(dpi, theme) {
                         show_error(&error);
                         PostMessageW(hwnd, WM_CLOSE, 0, 0);
                     }
+                }
+                let theme = (*pointer).preferences.theme;
+                let click_through = (*pointer).preferences.left_click_through;
+                if let Err(error) = apply_window_theme(hwnd, theme, click_through)
+                    .and_then(|()| configure_input(hwnd, pointer))
+                {
+                    show_error(&error);
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
                 }
                 SetWindowPos(
                     hwnd,
@@ -575,6 +613,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             unsafe {
+                (*pointer).mouse_hook = None;
                 let dialog = (*pointer).dialog;
                 (*pointer).dialog = null_mut();
                 if !dialog.is_null() {
@@ -671,13 +710,35 @@ unsafe fn keep_window_on_screen(hwnd: HWND) {
     }
 }
 
-fn apply_window_theme(hwnd: HWND, theme: Theme) -> Result<(), String> {
+fn configure_input(hwnd: HWND, pointer: *mut App) -> Result<(), String> {
+    // SAFETY: called only on the owning UI thread; no App borrow crosses hook APIs.
+    let (enabled, drag_enabled, theme) = unsafe {
+        (
+            (*pointer).preferences.left_click_through,
+            (*pointer).preferences.drag_enabled,
+            (*pointer).preferences.theme,
+        )
+    };
+    unsafe {
+        (*pointer).mouse_hook = None;
+    }
+    if enabled {
+        let hook = input::MouseHook::new(hwnd, drag_enabled, theme)?;
+        unsafe {
+            (*pointer).mouse_hook = Some(hook);
+        }
+    }
+    Ok(())
+}
+
+fn apply_window_theme(hwnd: HWND, theme: Theme, click_through: bool) -> Result<(), String> {
     // SAFETY: live UI-thread window. No App borrow crosses these reentrant APIs.
     let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
-    let new_style = if theme == Theme::Overlay {
-        style | WS_EX_LAYERED | WS_EX_NOACTIVATE
+    let base = style & !(WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT);
+    let new_style = if theme == Theme::Overlay || click_through {
+        base | WS_EX_LAYERED | WS_EX_NOACTIVATE | if click_through { WS_EX_TRANSPARENT } else { 0 }
     } else {
-        style & !(WS_EX_LAYERED | WS_EX_NOACTIVATE)
+        base
     };
     if style != new_style {
         unsafe {
@@ -704,6 +765,12 @@ fn apply_window_theme(hwnd: HWND, theme: Theme) -> Result<(), String> {
         && unsafe {
             SetLayeredWindowAttributes(hwnd, themes::overlay::TRANSPARENT_COLOR, 255, LWA_COLORKEY)
         } == 0
+    {
+        return Err(last_error("SetLayeredWindowAttributes"));
+    }
+    if theme != Theme::Overlay
+        && click_through
+        && unsafe { SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA) } == 0
     {
         return Err(last_error("SetLayeredWindowAttributes"));
     }
@@ -829,6 +896,7 @@ unsafe fn update_window_shape(hwnd: HWND, pointer: *mut App) {
             DeleteObject(region.cast());
         }
     }
+    input::update_region(hwnd);
 }
 
 unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
@@ -996,6 +1064,7 @@ fn core_rows(count: usize) -> i32 {
 }
 
 fn paint(hwnd: HWND, app: &mut App) {
+    input::surface(hwnd, null_mut());
     let mut ps = PAINTSTRUCT::default();
     // SAFETY: every BeginPaint is paired with EndPaint, including buffer allocation failure.
     let screen = unsafe { BeginPaint(hwnd, &mut ps) };
@@ -1022,6 +1091,7 @@ fn paint(hwnd: HWND, app: &mut App) {
         }
         EndPaint(hwnd, &ps);
     }
+    input::surface(hwnd, if buffered { dc } else { null_mut() });
 }
 struct Painter {
     theme: Theme,

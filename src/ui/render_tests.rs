@@ -91,6 +91,7 @@ fn themes_render_usage_unavailable_values_and_transparent_background() {
                     tray: NOTIFYICONDATAW::default(),
                     taskbar_message: 0,
                     smoke_test: true,
+                    mouse_hook: None,
                 };
                 let mut painter = Painter {
                     theme,
@@ -209,7 +210,7 @@ fn native_window_can_switch_transparency_back_and_forth() {
             Theme::Overlay,
             Theme::Default,
         ] {
-            apply_window_theme(hwnd, theme).unwrap();
+            apply_window_theme(hwnd, theme, false).unwrap();
             let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
             assert_eq!(style & WS_EX_LAYERED != 0, theme == Theme::Overlay);
             assert_eq!(style & WS_EX_NOACTIVATE != 0, theme == Theme::Overlay);
@@ -222,6 +223,21 @@ fn native_window_can_switch_transparency_back_and_forth() {
                 );
                 assert_eq!(key, themes::overlay::TRANSPARENT_COLOR);
                 assert_eq!(flags, LWA_COLORKEY);
+            }
+        }
+        for theme in Theme::ALL {
+            for enabled in [true, false, true, false] {
+                apply_window_theme(hwnd, theme, enabled).unwrap();
+                let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+                assert_eq!(style & WS_EX_TRANSPARENT != 0, enabled);
+                assert_eq!(
+                    style & WS_EX_LAYERED != 0,
+                    enabled || theme == Theme::Overlay
+                );
+                if enabled {
+                    let hook = input::MouseHook::new(hwnd, true, theme).unwrap();
+                    drop(hook);
+                }
             }
         }
         DestroyWindow(hwnd);

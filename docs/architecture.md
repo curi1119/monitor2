@@ -10,6 +10,7 @@
 | src/topology.rs | 物理コアと論理CPUの対応、SMT集計 |
 | src/nvml.rs | NVMLの動的ロード・ABI、GPU値、ライブラリ寿命 |
 | src/ui.rs | Win32メッセージ、トレイ、GDI、DPI、テーマ切り替え・透過・ウィンドウ形状 |
+| src/ui/input.rs | クリックスルー時のCtrlドラッグ・右クリック・ホイールをUIスレッドのフックで処理 |
 | src/ui/themes.rs | テーマの描画振り分け、共通寸法の選択 |
 | src/ui/themes/default.rs | デフォルトの配色・ロゴ・グラデーション・枠・立体バー |
 | src/ui/themes/flat.rs | フラットの配色・単色バー・文字によるCPU／GPUの識別 |
@@ -43,6 +44,7 @@ SharedSettingsは設定値と停止・設定変更の通知を保持します。
 
 - 保存先は%LOCALAPPDATA%/monitor2/settings.ini。UTF-8のkey=value形式で、未指定項目は初期値、未知のキーは無視します。不正な既知の値はエラーです。
 - テーマは`theme=default`／`flat`／`overlay`。未指定はdefault。共有設定の更新後、UIは必要に応じてフォントと透過方式を切り替え、スクロール位置をリセットして寸法・ウィンドウ形状を再計算します。監視データの取得方式は変えません。
+- `drag_enabled`／`left_click_through`は真偽値で、未指定はどちらもtrue。保存後すぐに反映し、次回起動にも引き継ぎます。クリックスルーを無効にした場合や終了時はマウスフックを解除します。
 - 監視間隔は250〜60000ms。画面では秒を入力し、有限値と範囲を検証してmsへ変換します。
 - 保存は同じディレクトリの一時ファイルへ書いてrenameします。その後、自動起動のレジストリを変更します。レジストリ変更失敗時は設定ファイルの復元を試みます。
 - 自動起動はHKCU/Software/Microsoft/Windows/CurrentVersion/Runのmonitor2値へ、引用符で囲んだ実行ファイルパスを登録します。管理者向け・全ユーザー向けの登録は行いません。

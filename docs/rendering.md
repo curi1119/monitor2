@@ -69,10 +69,20 @@ LoadIconWによる標準サイズへの縮小とDrawIconExでの再縮小を避�
 
 ## 操作と実機確認
 
-通常起動では枠・タスクバー表示なしの常駐画面です。左ドラッグで移動し、右クリックとトレイから設定・終了を選びます。最前面は設定に従います。設定画面はsrc/settings_ui.rsの標準コントロールで構成し、IsDialogMessageWを使います。
+通常起動では枠・タスクバー表示なしの常駐画面です。ドラッグが有効なら、クリックスルー有効時はCtrl＋左ドラッグ、無効時は左ドラッグで移動します。右クリックとトレイから設定・終了を選びます。最前面は設定に従います。設定画面はsrc/settings_ui.rsの標準コントロールで構成し、IsDialogMessageWを使います。
 
 previewで文字・アイコン・配置を確認し、通常モードでトレイ・ドラッグ・最前面も確認します。設定画面を異なるDPIのモニターへ移動した場合、現状は開き直して新しいDPIを反映します。主画面の複数DPI環境も実機確認範囲を明示してください。
 
 起動時は保存済みのスクリーン座標でウィンドウを作成し、起動後と監視データによる高さ変更時に、最寄りモニターの作業領域内へ位置を補正します。領域より大きい場合は左上を作業領域の左上に合わせます。ドラッグ中の各移動ではファイルへ書き込まず、[WM_EXITSIZEMOVE](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-exitsizemove)で[GetWindowRect](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrect)の左上座標を保存します。復元時のモニター選択・作業領域取得には[MonitorFromRect](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-monitorfromrect)と[GetMonitorInfoW](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getmonitorinfow)を使います。複数モニター・異なるDPI間での位置復元は実機での追加確認が必要です。
 
 現在のユーザー操作は[settings.md](settings.md)、画面変更の経緯と実機検証記録は[phases.md](phases.md)を参照してください。
+
+## 左クリックスルーと移動操作
+
+クリックスルー有効時はWS_EX_LAYEREDとWS_EX_TRANSPARENTを組み合わせ、Windowsが背後へマウス入力を配送します。デフォルト／フラットはLWA_ALPHA=255、オーバレイは既存のLWA_COLORKEYを使用します。無効時は透明スタイルを解除し、オーバレイだけレイヤード属性を維持します。
+
+有効時だけUIスレッドでWH_MOUSE_LLを登録し、Ctrl＋左ボタンによる移動開始、右クリックメニュー、ホイールスクロールを主画面へPostMessageします。コールバックは移動イベントで形状を調べず、割り当て・ファイル操作・同期メッセージ送信を行いません。ボタン／ホイール時はウィンドウ矩形、所有リージョン、オーバレイの描画バッファの色を使い、隙間・透過ピクセルを除外します。上に重なる可視ウィンドウの矩形も確認し、判定が不明な場合は入力を通します。
+
+フックの状態はUIスレッドのthread_localにハンドルのコピーだけを保持し、Appへの参照を持ちません。GetWindowRgnでコピーしたリージョンはフックが所有し、描画バッファは借用します。バッファ再確保前に参照を解除し、描画終了時に更新します。Dropは状態を消してからフックとリージョンを解放します。Ctrlドラッグの開始メッセージ受信時に左ボタンが既に離れていたら移動を開始しません。移動中はフックを休止して透過スタイルを一時解除し、終了後に設定を再適用します。
+
+参照: [Layered Windows](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features)、[LowLevelMouseProc](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelmouseproc)、[SetWindowsHookExW](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexw)、[GetWindowRgn](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrgn)。ゲームや管理者権限のアプリ上での手動操作、連続入力時のフック遅延は未検証です。

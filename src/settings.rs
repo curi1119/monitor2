@@ -42,6 +42,8 @@ pub struct Settings {
     pub show_core_numbers: bool,
     pub window_position: Option<(i32, i32)>,
     pub theme: Theme,
+    pub drag_enabled: bool,
+    pub left_click_through: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -54,6 +56,8 @@ impl Default for Settings {
             show_core_numbers: true,
             window_position: None,
             theme: Theme::Default,
+            drag_enabled: true,
+            left_click_through: true,
         }
     }
 }
@@ -83,6 +87,8 @@ impl Settings {
                         .ok_or("テーマが不正です")?
                 }
                 "topmost" => result.topmost = boolean()?,
+                "drag_enabled" => result.drag_enabled = boolean()?,
+                "left_click_through" => result.left_click_through = boolean()?,
                 "autostart" => result.autostart = boolean()?,
                 "interval_ms" => {
                     result.interval_ms = value.parse().map_err(|_| "更新間隔が不正です")?
@@ -135,6 +141,10 @@ impl Settings {
             text.push_str(&format!("window_x={x}\nwindow_y={y}\n"));
         }
         text.push_str(&format!("theme={}\n", self.theme.key()));
+        text.push_str(&format!(
+            "drag_enabled={}\nleft_click_through={}\n",
+            self.drag_enabled, self.left_click_through
+        ));
         text
     }
     pub fn load() -> Result<Self, String> {
@@ -314,6 +324,23 @@ impl SharedSettings {
 mod tests {
     use super::*;
     #[test]
+    fn mouse_options_default_on_and_round_trip_all_combinations() {
+        let old = Settings::parse("theme=flat\n").unwrap();
+        assert!(old.drag_enabled && old.left_click_through);
+        for drag_enabled in [false, true] {
+            for left_click_through in [false, true] {
+                let settings = Settings {
+                    drag_enabled,
+                    left_click_through,
+                    ..Settings::default()
+                };
+                assert_eq!(Settings::parse(&settings.encode()).unwrap(), settings);
+            }
+        }
+        assert!(Settings::parse("drag_enabled=invalid").is_err());
+        assert!(Settings::parse("left_click_through=invalid").is_err());
+    }
+    #[test]
     fn themes_round_trip_and_old_settings_keep_default() {
         assert_eq!(
             Settings::parse("interval_ms=1000\n").unwrap().theme,
@@ -340,6 +367,8 @@ mod tests {
             show_core_numbers: false,
             window_position: Some((-1920, 80)),
             theme: Theme::Default,
+            drag_enabled: false,
+            left_click_through: false,
         };
         assert_eq!(
             Settings::parse(&(s.encode() + "future_key=value\n")).unwrap(),
