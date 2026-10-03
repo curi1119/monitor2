@@ -443,35 +443,32 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
-        WM_LBUTTONDOWN | input::BEGIN_DRAG => {
-            if message == input::BEGIN_DRAG
-                && unsafe {
-                    windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(
-                        windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_LBUTTON as i32,
-                    )
-                } >= 0
-            {
-                return 0;
+        input::MOVE_DRAG => {
+            input::move_window(hwnd);
+            0
+        }
+        input::END_DRAG => {
+            unsafe {
+                save_window_position(hwnd, pointer);
+                if !(*pointer).preferences.left_click_through
+                    && let Err(error) = configure_input(hwnd, pointer)
+                {
+                    show_error(&error);
+                }
             }
+            0
+        }
+        WM_LBUTTONDOWN => {
             if !unsafe { (*pointer).preferences.drag_enabled } {
                 return 0;
             }
-            input::suspend(hwnd, true);
             unsafe {
-                let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style & !(WS_EX_TRANSPARENT as isize));
+                let mut point = POINT::default();
+                GetCursorPos(&mut point);
+                let coordinates =
+                    ((point.x as u16 as u32) | ((point.y as u16 as u32) << 16)) as isize;
                 windows_sys::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
-                SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
-            }
-            input::suspend(hwnd, false);
-            let (theme, click_through) = unsafe {
-                (
-                    (*pointer).preferences.theme,
-                    (*pointer).preferences.left_click_through,
-                )
-            };
-            if let Err(error) = apply_window_theme(hwnd, theme, click_through) {
-                show_error(&error);
+                SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, coordinates);
             }
             0
         }
@@ -719,6 +716,9 @@ fn configure_input(hwnd: HWND, pointer: *mut App) -> Result<(), String> {
             (*pointer).preferences.theme,
         )
     };
+    if input::reconfigure(hwnd, enabled, drag_enabled, theme) {
+        return Ok(());
+    }
     unsafe {
         (*pointer).mouse_hook = None;
     }

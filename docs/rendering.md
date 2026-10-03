@@ -81,8 +81,9 @@ previewで文字・アイコン・配置を確認し、通常モードでトレ�
 
 クリックスルー有効時はWS_EX_LAYEREDとWS_EX_TRANSPARENTを組み合わせ、Windowsが背後へマウス入力を配送します。デフォルト／フラットはLWA_ALPHA=255、オーバレイは既存のLWA_COLORKEYを使用します。無効時は透明スタイルを解除し、オーバレイだけレイヤード属性を維持します。
 
-有効時だけUIスレッドでWH_MOUSE_LLを登録し、Ctrl＋左ボタンによる移動開始、右クリックメニュー、ホイールスクロールを主画面へPostMessageします。コールバックは移動イベントで形状を調べず、割り当て・ファイル操作・同期メッセージ送信を行いません。ボタン／ホイール時はウィンドウ矩形、所有リージョン、オーバレイの描画バッファの色を使い、隙間・透過ピクセルを除外します。上に重なる可視ウィンドウの矩形も確認し、判定が不明な場合は入力を通します。
+有効時だけUIスレッドでWH_MOUSE_LLを登録し、Ctrl＋左押下でカーソルのスクリーン座標とウィンドウ位置を記録します。移動中はその差分で目標座標を求め、UIスレッドへ通知してSetWindowPos（SWP_NOACTIVATE）で移動します。通常のWindowsの移動ループやGetAsyncKeyState(VK_LBUTTON)には依存しません。押下と対応する解放はどちらも抑制し、移動イベントはカーソルが動くようOSへ通します。Ctrlを途中で離した場合やパネル外へ移動した場合も、左ボタンの解放まで追跡します。解放時の最終座標も適用し、その後位置を保存します。
 
-フックの状態はUIスレッドのthread_localにハンドルのコピーだけを保持し、Appへの参照を持ちません。GetWindowRgnでコピーしたリージョンはフックが所有し、描画バッファは借用します。バッファ再確保前に参照を解除し、描画終了時に更新します。Dropは状態を消してからフックとリージョンを解放します。Ctrlドラッグの開始メッセージ受信時に左ボタンが既に離れていたら移動を開始しません。移動中はフックを休止して透過スタイルを一時解除し、終了後に設定を再適用します。
+移動通知は最新座標にまとめ、未処理通知がある間は追加しません。コールバックは割り当て・ファイル操作・描画・同期メッセージ送信を行いません。通常の移動イベントでは形状を調べず、ボタン／ホイール時のみ矩形・所有リージョン・描画バッファの透過色で判定します。右クリックメニューとホイールは主画面へPostMessageします。
 
-参照: [Layered Windows](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features)、[LowLevelMouseProc](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelmouseproc)、[SetWindowsHookExW](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexw)、[GetWindowRgn](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrgn)。ゲームや管理者権限のアプリ上での手動操作、連続入力時のフック遅延は未検証です。
+状態はUIスレッドのthread_localにハンドルのコピーだけを保持し、Appへの参照を持ちません。リージョンはフックが所有し、描画バッファは借用します。バッファ再確保前に参照を解除し、描画終了時に更新します。設定変更では移動をキャンセルしますが、捕捉済みの押下に対応する解放まではフックを残します。無効化と解放の後、または終了時にフック・リージョンを解放します。通常ドラッグ（クリックスルー無効時）のWM_NCLBUTTONDOWNには実際のスクリーン座標を渡します。
+参照: [Layered Windows](https://learn.microsoft.com/en-us/windows/win32/winmsg/window-features)、[LowLevelMouseProc](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelmouseproc)、[SetWindowsHookExW](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexw)、[SetWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)、[GetWindowRgn](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrgn)。ゲームや管理者権限のアプリ上での手動操作、連続入力時のフック遅延は未検証です。
