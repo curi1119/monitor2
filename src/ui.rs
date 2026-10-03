@@ -252,6 +252,7 @@ pub fn run(
     }
     let dpi = unsafe { GetDpiForSystem() }.max(96);
     let preferences = settings.get();
+    let (window_x, window_y) = preferences.window_position.unwrap_or((40, 80));
     let instance = unsafe { GetModuleHandleW(null()) };
     let resource_icon = |id: usize| unsafe { LoadIconW(instance, id as _) };
     let mut app = Box::new(App {
@@ -296,8 +297,8 @@ pub fn run(
             class.lpszClassName,
             w!("monitor2"),
             WS_POPUP,
-            40,
-            80,
+            window_x,
+            window_y,
             scale(WIDTH, dpi),
             scale(INITIAL_HEIGHT, dpi),
             null_mut(),
@@ -313,14 +314,29 @@ pub fn run(
         return Err(last_error("CreateWindow"));
     }
     app.dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-    if let Err(error) = app.gdi.fonts(app.dpi) {
-        unsafe {
-            DestroyWindow(hwnd);
-            UnregisterClassW(class.lpszClassName, instance);
+    let resources = app.gdi.fonts(app.dpi).and_then(|()| Logos::new(app.dpi));
+    match resources {
+        Ok(logos) => app.logos = logos,
+        Err(error) => {
+            unsafe {
+                DestroyWindow(hwnd);
+                UnregisterClassW(class.lpszClassName, instance);
+            }
+            return Err(error);
         }
-        return Err(error);
     }
     unsafe {
+        // The restored position may be on a different-DPI monitor from the system.
+        // No App borrow is held across this synchronous, reentrant call.
+        SetWindowPos(
+            hwnd,
+            null_mut(),
+            0,
+            0,
+            scale(WIDTH, app.dpi),
+            scale(INITIAL_HEIGHT, app.dpi),
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
         update_window_shape(hwnd, &mut *app);
     }
     app.tray.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
@@ -344,6 +360,7 @@ pub fn run(
     }
     unsafe {
         refresh(hwnd, &mut *app);
+        keep_window_on_screen(hwnd);
     }
     let mut message = MSG::default();
     let result = loop {
@@ -425,6 +442,18 @@ unsafe extern "system" fn window_proc(
                 SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
             }
             0
+        }
+        WM_EXITSIZEMOVE => {
+            unsafe {
+                save_window_position(hwnd, pointer);
+            }
+            0
+        }
+        WM_QUERYENDSESSION => {
+            unsafe {
+                save_window_position(hwnd, pointer);
+            }
+            1
         }
         crate::settings_ui::CHANGED => {
             let preferences = unsafe { (*pointer).settings.get() };
@@ -520,6 +549,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_CLOSE => {
             unsafe {
+                save_window_position(hwnd, pointer);
                 DestroyWindow(hwnd);
             }
             0
@@ -551,6 +581,73 @@ unsafe extern "system" fn window_proc(
             } else {
                 unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
             }
+        }
+    }
+}
+
+unsafe fn save_window_position(hwnd: HWND, pointer: *mut App) {
+    // SAFETY: live UI-thread window/App. GetWindowRect does not dispatch messages;
+    // clone shared ownership before any error dialog can reenter the procedure.
+    if unsafe { (*pointer).smoke_test } {
+        return;
+    }
+    let mut rect = RECT::default();
+    let result = if unsafe { GetWindowRect(hwnd, &mut rect) } == 0 {
+        Err(last_error("GetWindowRect"))
+    } else {
+        let settings = unsafe { Arc::clone(&(*pointer).settings) };
+        settings.save_window_position((rect.left, rect.top))
+    };
+    if let Err(error) = result {
+        let error = wide(&error);
+        unsafe {
+            MessageBoxW(
+                hwnd,
+                error.as_ptr(),
+                w!("ウィンドウ位置を保存できません"),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+}
+
+fn position_in_work_area(rect: RECT, work: RECT) -> (i32, i32) {
+    // Saturation also handles manually edited coordinates near i32 limits.
+    let width = rect.right.saturating_sub(rect.left).max(0);
+    let height = rect.bottom.saturating_sub(rect.top).max(0);
+    (
+        rect.left
+            .clamp(work.left, work.right.saturating_sub(width).max(work.left)),
+        rect.top
+            .clamp(work.top, work.bottom.saturating_sub(height).max(work.top)),
+    )
+}
+
+unsafe fn keep_window_on_screen(hwnd: HWND) {
+    let mut rect = RECT::default();
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: stack output buffers and live window; no App borrow crosses SetWindowPos.
+    if unsafe { GetWindowRect(hwnd, &mut rect) } == 0
+        || unsafe { GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &mut info) }
+            == 0
+    {
+        return;
+    }
+    let (x, y) = position_in_work_area(rect, info.rcWork);
+    if (x, y) != (rect.left, rect.top) {
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
         }
     }
 }
@@ -670,6 +767,7 @@ unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
                 scale(height, dpi),
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            keep_window_on_screen(hwnd);
         }
     }
     unsafe {
@@ -1100,6 +1198,41 @@ fn wheel_steps(remainder: &mut i32, delta: i32) -> i32 {
 #[cfg(test)]
 mod review_tests {
     use super::*;
+    #[test]
+    fn restored_position_stays_in_work_area() {
+        let work = RECT {
+            left: -1920,
+            top: -200,
+            right: 0,
+            bottom: 880,
+        };
+        let rect = |x: i32, y: i32| RECT {
+            left: x,
+            top: y,
+            right: x.saturating_add(140),
+            bottom: y.saturating_add(280),
+        };
+        assert_eq!(
+            position_in_work_area(rect(-1800, -100), work),
+            (-1800, -100)
+        );
+        assert_eq!(position_in_work_area(rect(4000, 2000), work), (-140, 600));
+        assert_eq!(
+            position_in_work_area(rect(i32::MIN, i32::MIN), work),
+            (-1920, -200)
+        );
+        assert_eq!(
+            position_in_work_area(rect(i32::MAX, i32::MAX), work),
+            (0, 880)
+        );
+        let tiny = RECT {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        assert_eq!(position_in_work_area(rect(20, 20), tiny), (0, 0));
+    }
     #[test]
     fn fractional_wheel_input_accumulates_in_both_directions() {
         let mut remainder = 0;

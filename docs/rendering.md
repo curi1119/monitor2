@@ -61,4 +61,6 @@ LoadIconWによる標準サイズへの縮小とDrawIconExでの再縮小を避�
 
 previewで文字・アイコン・配置を確認し、通常モードでトレイ・ドラッグ・最前面も確認します。設定画面を異なるDPIのモニターへ移動した場合、現状は開き直して新しいDPIを反映します。主画面の複数DPI環境も実機確認範囲を明示してください。
 
+起動時は保存済みのスクリーン座標でウィンドウを作成し、起動後と監視データによる高さ変更時に、最寄りモニターの作業領域内へ位置を補正します。領域より大きい場合は左上を作業領域の左上に合わせます。ドラッグ中の各移動ではファイルへ書き込まず、[WM_EXITSIZEMOVE](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-exitsizemove)で[GetWindowRect](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrect)の左上座標を保存します。復元時のモニター選択・作業領域取得には[MonitorFromRect](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-monitorfromrect)と[GetMonitorInfoW](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getmonitorinfow)を使います。複数モニター・異なるDPI間での位置復元は実機での追加確認が必要です。
+
 現在のユーザー操作は[settings.md](settings.md)、画面変更の経緯と実機検証記録は[phases.md](phases.md)を参照してください。

@@ -311,6 +311,7 @@ fn read(hwnd: HWND) -> Result<Settings, String> {
         physical_cores: selected == 0,
         show_core_percent: checked(hwnd, PERCENT),
         show_core_numbers: checked(hwnd, NUMBERS),
+        window_position: None, // SharedSettings::apply retains the current position.
     })
 }
 unsafe extern "system" fn proc(

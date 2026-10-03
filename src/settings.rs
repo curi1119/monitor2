@@ -15,6 +15,7 @@ pub struct Settings {
     pub physical_cores: bool,
     pub show_core_percent: bool,
     pub show_core_numbers: bool,
+    pub window_position: Option<(i32, i32)>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -25,12 +26,14 @@ impl Default for Settings {
             physical_cores: false,
             show_core_percent: false,
             show_core_numbers: true,
+            window_position: None,
         }
     }
 }
 impl Settings {
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut result = Self::default();
+        let (mut x, mut y) = (None, None);
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -54,9 +57,28 @@ impl Settings {
                 "physical_cores" => result.physical_cores = boolean()?,
                 "show_core_percent" => result.show_core_percent = boolean()?,
                 "show_core_numbers" => result.show_core_numbers = boolean()?,
+                "window_x" => {
+                    x = Some(
+                        value
+                            .parse::<i32>()
+                            .map_err(|_| "ウィンドウのX座標が不正です")?,
+                    )
+                }
+                "window_y" => {
+                    y = Some(
+                        value
+                            .parse::<i32>()
+                            .map_err(|_| "ウィンドウのY座標が不正です")?,
+                    )
+                }
                 _ => {} // Preserve forward compatibility with newer configuration keys.
             }
         }
+        result.window_position = match (x, y) {
+            (Some(x), Some(y)) => Some((x, y)),
+            (None, None) => None,
+            _ => return Err("ウィンドウ座標はXとYの両方を指定してください".into()),
+        };
         result.validate()?;
         Ok(result)
     }
@@ -67,7 +89,7 @@ impl Settings {
         Ok(())
     }
     fn encode(&self) -> String {
-        format!(
+        let mut text = format!(
             "topmost={}\nautostart={}\ninterval_ms={}\nphysical_cores={}\nshow_core_percent={}\nshow_core_numbers={}\n",
             self.topmost,
             self.autostart,
@@ -75,7 +97,11 @@ impl Settings {
             self.physical_cores,
             self.show_core_percent,
             self.show_core_numbers
-        )
+        );
+        if let Some((x, y)) = self.window_position {
+            text.push_str(&format!("window_x={x}\nwindow_y={y}\n"));
+        }
+        text
     }
     pub fn load() -> Result<Self, String> {
         let path = config_path()?;
@@ -102,6 +128,12 @@ impl Settings {
             return Err(error);
         }
         Ok(())
+    }
+    // Position-only saves must not change the user's Run registry entry.
+    fn save_position(&self) -> Result<(), String> {
+        let path = config_path()?;
+        fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+        atomic_save(&path, self.encode().as_bytes())
     }
 }
 fn atomic_save(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
@@ -209,11 +241,24 @@ impl SharedSettings {
     pub fn get(&self) -> Settings {
         self.value.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
-    pub fn apply(&self, settings: Settings) -> Result<(), String> {
+    pub fn apply(&self, mut settings: Settings) -> Result<(), String> {
+        // The dialog edits preferences only; retain the latest position even if it
+        // was moved after the dialog opened. UI-thread writes are serialized.
+        settings.window_position = self.get().window_position;
         settings.save()?;
         *self.value.lock().unwrap_or_else(|e| e.into_inner()) = settings;
         self.signal.lock().unwrap_or_else(|e| e.into_inner()).1 += 1;
         self.wake.notify_one();
+        Ok(())
+    }
+    pub fn save_window_position(&self, position: (i32, i32)) -> Result<(), String> {
+        let mut settings = self.get();
+        if settings.window_position == Some(position) {
+            return Ok(());
+        }
+        settings.window_position = Some(position);
+        settings.save_position()?;
+        *self.value.lock().unwrap_or_else(|e| e.into_inner()) = settings;
         Ok(())
     }
     pub fn wait(&self) -> bool {
@@ -243,6 +288,7 @@ mod tests {
             physical_cores: true,
             show_core_percent: true,
             show_core_numbers: false,
+            window_position: Some((-1920, 80)),
         };
         assert_eq!(
             Settings::parse(&(s.encode() + "future_key=value\n")).unwrap(),
@@ -254,5 +300,23 @@ mod tests {
         assert!(Settings::parse("interval_ms=0\n").is_err());
         assert!(Settings::parse("interval_ms=60001\n").is_err());
         assert!(Settings::parse("topmost=maybe\n").is_err());
+    }
+    #[test]
+    fn window_coordinates_are_optional_signed_and_paired() {
+        assert_eq!(Settings::parse("").unwrap().window_position, None);
+        assert_eq!(
+            Settings::parse("window_x=-1920\nwindow_y=-80\n")
+                .unwrap()
+                .window_position,
+            Some((-1920, -80))
+        );
+        for text in [
+            "window_x=1",
+            "window_y=1",
+            "window_x=no\nwindow_y=0",
+            "window_x=2147483648\nwindow_y=0",
+        ] {
+            assert!(Settings::parse(text).is_err());
+        }
     }
 }
