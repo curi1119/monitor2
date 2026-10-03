@@ -22,6 +22,7 @@ const WIDTH: i32 = 140;
 const CORE_TOP: i32 = 94;
 const CORE_ROW: i32 = 10;
 const GPU_PANEL_HEIGHT: i32 = 96;
+const PANEL_GAP: i32 = 2;
 const INITIAL_HEIGHT: i32 = 280;
 const CORNER_DIAMETER: i32 = 6;
 // RGB literals are converted to GDI's COLORREF (0x00BBGGRR).
@@ -228,7 +229,7 @@ struct App {
     scroll: i32,
     wheel_remainder: i32,
     content_height: i32,
-    window_shape: (i32, i32, u32),
+    window_shape: Option<PanelShape>,
     height: i32,
     topmost: bool,
     settings: Arc<crate::settings::SharedSettings>,
@@ -263,7 +264,7 @@ pub fn run(
         scroll: 0,
         wheel_remainder: 0,
         content_height: INITIAL_HEIGHT,
-        window_shape: (0, 0, 0),
+        window_shape: None,
         height: INITIAL_HEIGHT,
         topmost: preferences.topmost,
         settings,
@@ -508,6 +509,9 @@ unsafe extern "system" fn window_proc(
                     (app.scroll - steps * 48).clamp(0, (app.content_height - app.height).max(0));
                 InvalidateRect(hwnd, null(), 0);
             }
+            unsafe {
+                update_window_shape(hwnd, pointer);
+            }
             0
         }
         WM_KEYDOWN if wparam == 27 => {
@@ -652,6 +656,74 @@ unsafe fn keep_window_on_screen(hwnd: HWND) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PanelShape {
+    width: i32,
+    height: i32,
+    dpi: u32,
+    scroll: i32,
+    cpu_height: i32,
+    gpu_count: usize,
+}
+
+fn cpu_panel_height(rows: i32) -> i32 {
+    102 + rows * CORE_ROW
+}
+
+impl PanelShape {
+    fn region(self) -> Result<HRGN, String> {
+        // SAFETY: all regions are owned locally until the union is returned. Each
+        // temporary is deleted on success/failure; the caller owns the result.
+        unsafe {
+            let region = CreateRectRgn(0, 0, 0, 0);
+            if region.is_null() {
+                return Err(last_error("CreateRectRgn"));
+            }
+            let diameter = scale(CORNER_DIAMETER, self.dpi);
+            for i in 0..=self.gpu_count {
+                let (top, height) = if i == 0 {
+                    (0, self.cpu_height)
+                } else {
+                    (
+                        self.cpu_height
+                            + PANEL_GAP
+                            + (i - 1) as i32 * (GPU_PANEL_HEIGHT + PANEL_GAP),
+                        GPU_PANEL_HEIGHT,
+                    )
+                };
+                let bottom = scale(top + height - self.scroll, self.dpi);
+                let top = scale(top - self.scroll, self.dpi);
+                if bottom <= 0 || top >= self.height {
+                    continue;
+                }
+                let panel = CreateRoundRectRgn(0, top, self.width, bottom, diameter, diameter);
+                if panel.is_null() {
+                    DeleteObject(region.cast());
+                    return Err(last_error("CreateRoundRectRgn"));
+                }
+                let combined = CombineRgn(region, region, panel, RGN_OR);
+                DeleteObject(panel.cast());
+                if combined == 0 {
+                    DeleteObject(region.cast());
+                    return Err(last_error("CombineRgn"));
+                }
+            }
+            let viewport = CreateRectRgn(0, 0, self.width, self.height);
+            if viewport.is_null() {
+                DeleteObject(region.cast());
+                return Err(last_error("CreateRectRgn"));
+            }
+            let clipped = CombineRgn(region, region, viewport, RGN_AND);
+            DeleteObject(viewport.cast());
+            if clipped == 0 {
+                DeleteObject(region.cast());
+                return Err(last_error("CombineRgn"));
+            }
+            Ok(region)
+        }
+    }
+}
+
 unsafe fn update_window_shape(hwnd: HWND, pointer: *mut App) {
     let mut rect = RECT::default();
     // SAFETY: this is our live borderless window; its client and window origins match.
@@ -659,26 +731,37 @@ unsafe fn update_window_shape(hwnd: HWND, pointer: *mut App) {
         return;
     }
     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-    let shape = (rect.right, rect.bottom, dpi);
-    if rect.right <= 0 || rect.bottom <= 0 || unsafe { (*pointer).window_shape } == shape {
+    let shape = {
+        // SAFETY: UI-thread App; this borrow ends before SetWindowRgn can reenter.
+        let app = unsafe { &*pointer };
+        PanelShape {
+            width: rect.right,
+            height: rect.bottom,
+            dpi,
+            scroll: app.scroll,
+            cpu_height: cpu_panel_height(core_rows(displayed_cpus(app).len())),
+            gpu_count: app.snapshot.gpus.len().max(1),
+        }
+    };
+    if rect.right <= 0 || rect.bottom <= 0 || unsafe { (*pointer).window_shape } == Some(shape) {
         return;
     }
-    let diameter = scale(CORNER_DIAMETER, dpi);
-    let region =
-        unsafe { CreateRoundRectRgn(0, 0, rect.right + 1, rect.bottom + 1, diameter, diameter) };
-    if region.is_null() {
-        eprintln!("{}", last_error("CreateRoundRectRgn"));
-        return;
-    }
+    let region = match shape.region() {
+        Ok(region) => region,
+        Err(error) => {
+            eprintln!("{error}");
+            return;
+        }
+    };
     // Record before SetWindowRgn, which can synchronously send window-position messages.
     // No App reference is held over that call. Success transfers region ownership to Windows.
     unsafe {
-        (*pointer).window_shape = shape;
+        (*pointer).window_shape = Some(shape);
     }
     if unsafe { SetWindowRgn(hwnd, region, 1) } == 0 {
         eprintln!("{}", last_error("SetWindowRgn"));
         unsafe {
-            (*pointer).window_shape = (0, 0, 0);
+            (*pointer).window_shape = None;
             DeleteObject(region.cast());
         }
     }
@@ -736,8 +819,8 @@ unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
 
         let cpus = displayed_cpus(app);
         let rows = core_rows(cpus.len());
-        app.content_height =
-            104 + rows * CORE_ROW + app.snapshot.gpus.len().max(1) as i32 * GPU_PANEL_HEIGHT;
+        app.content_height = cpu_panel_height(rows)
+            + app.snapshot.gpus.len().max(1) as i32 * (PANEL_GAP + GPU_PANEL_HEIGHT);
         let mut info = MONITORINFO {
             cbSize: size_of::<MONITORINFO>() as u32,
             ..Default::default()
@@ -771,6 +854,7 @@ unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
         }
     }
     unsafe {
+        update_window_shape(hwnd, pointer);
         InvalidateRect(hwnd, null(), 0);
     }
 }
@@ -956,9 +1040,9 @@ fn paint(hwnd: HWND, app: &mut App) {
             );
         }
     }
-    let gpu_start = 104 + rows * CORE_ROW;
+    let gpu_start = cpu_panel_height(rows) + PANEL_GAP;
     for (i, gpu) in app.snapshot.gpus.iter().enumerate() {
-        let y = gpu_start + i as i32 * GPU_PANEL_HEIGHT;
+        let y = gpu_start + i as i32 * (GPU_PANEL_HEIGHT + PANEL_GAP);
         painter.panel(y);
         painter.icon(4, y + 4, 28, app.logos.0[2]);
         painter.text(40, y + 3, 74, 16, "GPU Usage", 0, TEXT);
@@ -1008,9 +1092,12 @@ fn paint(hwnd: HWND, app: &mut App) {
         let y = 6 + app.scroll * (track - thumb) / (app.content_height - app.height);
         painter.rect(WIDTH - 5, app.scroll + y, 2, thumb, MUTED);
     }
-    painter.frame(0, gpu_start - 2);
+    painter.frame(0, cpu_panel_height(rows));
     for i in 0..app.snapshot.gpus.len().max(1) {
-        painter.frame(gpu_start + i as i32 * GPU_PANEL_HEIGHT, GPU_PANEL_HEIGHT);
+        painter.frame(
+            gpu_start + i as i32 * (GPU_PANEL_HEIGHT + PANEL_GAP),
+            GPU_PANEL_HEIGHT,
+        );
     }
     unsafe {
         SelectObject(dc, old_font);
@@ -1198,6 +1285,49 @@ fn wheel_steps(remainder: &mut i32, delta: i32) -> i32 {
 #[cfg(test)]
 mod review_tests {
     use super::*;
+    #[test]
+    fn panel_regions_exclude_gaps_and_follow_scrolling_at_each_dpi() {
+        for dpi in [96, 120, 144, 192] {
+            for rows in [0, 4, 8, 32] {
+                for scroll in [0, 48, 144] {
+                    let cpu_height = cpu_panel_height(rows);
+                    let shape = PanelShape {
+                        width: scale(WIDTH, dpi),
+                        height: scale(480, dpi),
+                        dpi,
+                        scroll,
+                        cpu_height,
+                        gpu_count: 2,
+                    };
+                    let region = shape.region().unwrap();
+                    // SAFETY: test owns a live region and deletes it after querying.
+                    unsafe {
+                        let x = scale(WIDTH / 2, dpi);
+                        for i in 0..2 {
+                            let gap = cpu_height + i * (GPU_PANEL_HEIGHT + PANEL_GAP) - scroll;
+                            for y in scale(gap, dpi).max(0)
+                                ..scale(gap + PANEL_GAP, dpi).min(shape.height)
+                            {
+                                assert_eq!(
+                                    PtInRegion(region, x, y),
+                                    0,
+                                    "gap at dpi={dpi}, rows={rows}, scroll={scroll}, y={y}"
+                                );
+                            }
+                            let panel_center = scale(gap + PANEL_GAP + GPU_PANEL_HEIGHT / 2, dpi);
+                            if (0..shape.height).contains(&panel_center) {
+                                assert_ne!(PtInRegion(region, x, panel_center), 0);
+                            }
+                        }
+                        assert_eq!(PtInRegion(region, x, -1), 0);
+                        assert_eq!(PtInRegion(region, x, shape.height), 0);
+                        assert_eq!(PtInRegion(region, shape.width, 30), 0);
+                        DeleteObject(region.cast());
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn restored_position_stays_in_work_area() {
         let work = RECT {

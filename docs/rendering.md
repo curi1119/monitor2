@@ -26,9 +26,11 @@ src/ui.rsのWin32/GDI画面です。基本幅140 DIP、16論理コアとGPU1台�
 
 外周は旧版に合わせた灰白色（RGB #656566）、1デバイスピクセルの線、角の半径は約3 DIPです。stock DC_PENとHOLLOW_BRUSHを選択してRoundRectで最後に描き、元のペンとブラシを復元します。CPUと各GPUを別々の枠で囲み、線を外周から1 DIP内側へ置いて角のクリッピングを避けます。枠は各パネルの内容と一緒にスクロールします。
 
-CreateRoundRectRgn／SetWindowRgnで実際のウィンドウ形状も角丸にします。WM_SIZEと初期化時に寸法・DPIを確認し、変化したときだけリージョンを作ります。SetWindowRgnは同期メッセージを送るため、呼び出し前に寸法を記録し、Appの参照を保持しません。成功時はリージョンの所有権をWindowsへ渡し、失敗時だけDeleteObjectします。
+CPU・RAMと各GPUの背景を角丸パネルとして分離し、パネル間に2 DIPの完全に透過した隙間を設けます。隙間とパネルの角から背後のウィンドウが見え、そこへのクリックも背後へ通ります。CPU・RAMは1つのパネルにまとめ、各パネルから画面全体をドラッグできます。GPU1台の場合の全体の高さは従来と同じです。
 
-参照: [SetWindowRgn](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowrgn)、[CreateRoundRectRgn](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-createroundrectrgn)、[RoundRect](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-roundrect)。
+CreateRoundRectRgnで各パネルの形状を作り、CombineRgnのRGN_ORで結合した後、RGN_ANDで表示領域へ切り詰めてSetWindowRgnへ渡します。寸法・DPI・スクロール位置・CPUパネルの高さ・GPUパネル数を記録し、変化したときだけリージョンを作ります。スクロールでは形状も内容と一緒に移動します。SetWindowRgnは同期メッセージを送るため、呼び出し前に形状を記録し、Appの参照を保持しません。成功時は結合リージョンの所有権をWindowsへ渡し、失敗時だけDeleteObjectします。一時的なパネル・表示領域のリージョンは結合後に解放します。
+
+参照: [SetWindowRgn](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowrgn)、[CreateRoundRectRgn](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-createroundrectrgn)、[CombineRgn](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-combinergn)、[RoundRect](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-roundrect)。
 
 ## GDIと描画コスト
 
