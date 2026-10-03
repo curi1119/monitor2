@@ -1,6 +1,6 @@
 use crate::{
     hardware::wide,
-    settings::{Settings, SharedSettings},
+    settings::{Settings, SharedSettings, Theme},
 };
 use std::{
     ptr::{null, null_mut},
@@ -23,6 +23,7 @@ const INTERVAL: i32 = 103;
 const CORES: i32 = 104;
 const PERCENT: i32 = 105;
 const NUMBERS: i32 = 106;
+const THEME: i32 = 107;
 const SAVE: usize = 201;
 const CANCEL: usize = IDCANCEL as usize;
 struct Dialog {
@@ -51,7 +52,7 @@ pub fn open(owner: HWND, shared: Arc<SharedSettings>) -> Result<HWND, String> {
         left: 0,
         top: 0,
         right: s(360, dpi),
-        bottom: s(362, dpi),
+        bottom: s(402, dpi),
     };
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
     unsafe {
@@ -196,13 +197,43 @@ pub fn open(owner: HWND, shared: Arc<SharedSettings>) -> Result<HWND, String> {
         NUMBERS,
         dpi,
     );
+    child(hwnd, "STATIC", "テーマ", 0, 20, 274, 100, 22, 0, dpi);
+    let theme = child(
+        hwnd,
+        "COMBOBOX",
+        "",
+        CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
+        138,
+        272,
+        194,
+        150,
+        THEME,
+        dpi,
+    );
+    // SAFETY: child combo owns copies of these terminated strings; indices match Theme::ALL.
+    unsafe {
+        for option in Theme::ALL {
+            SendMessageW(
+                theme,
+                CB_ADDSTRING,
+                0,
+                wide(option.label()).as_ptr() as isize,
+            );
+        }
+        SendMessageW(
+            theme,
+            CB_SETCURSEL,
+            Theme::ALL.iter().position(|t| *t == value.theme).unwrap(),
+            0,
+        );
+    }
     child(
         hwnd,
         "STATIC",
         "設定は保存後すぐに反映されます。",
         0,
         20,
-        274,
+        314,
         320,
         22,
         0,
@@ -214,7 +245,7 @@ pub fn open(owner: HWND, shared: Arc<SharedSettings>) -> Result<HWND, String> {
         "保存",
         BS_DEFPUSHBUTTON as u32,
         168,
-        320,
+        360,
         78,
         26,
         SAVE as i32,
@@ -226,7 +257,7 @@ pub fn open(owner: HWND, shared: Arc<SharedSettings>) -> Result<HWND, String> {
         "キャンセル",
         0,
         254,
-        320,
+        360,
         86,
         26,
         CANCEL as i32,
@@ -304,6 +335,11 @@ fn read(hwnd: HWND) -> Result<Settings, String> {
     if selected != 0 && selected != 1 {
         return Err("コア表示を選択してください".into());
     }
+    let theme_index = unsafe { SendMessageW(GetDlgItem(hwnd, THEME), CB_GETCURSEL, 0, 0) };
+    let theme = Theme::ALL
+        .get(theme_index as usize)
+        .copied()
+        .ok_or("テーマを選択してください")?;
     Ok(Settings {
         topmost: checked(hwnd, TOP),
         autostart: checked(hwnd, START),
@@ -312,6 +348,7 @@ fn read(hwnd: HWND) -> Result<Settings, String> {
         show_core_percent: checked(hwnd, PERCENT),
         show_core_numbers: checked(hwnd, NUMBERS),
         window_position: None, // SharedSettings::apply retains the current position.
+        theme,
     })
 }
 unsafe extern "system" fn proc(

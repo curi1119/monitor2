@@ -1,10 +1,15 @@
 use crate::hardware::{Snapshot, wide};
+use crate::settings::Theme;
+#[cfg(test)]
+mod render_tests;
+mod themes;
 use std::{
     mem::size_of,
     ptr::{null, null_mut},
     sync::{Arc, Mutex},
     time::Duration,
 };
+use themes::default::*;
 use windows_sys::{
     Win32::{
         Foundation::*,
@@ -29,38 +34,6 @@ const CORNER_DIAMETER: i32 = 6;
 const fn rgb(value: u32) -> u32 {
     ((value & 0xff) << 16) | (value & 0xff00) | ((value >> 16) & 0xff)
 }
-const BG: u32 = rgb(0x021326);
-const PANEL_TOP: u32 = rgb(0x071F47);
-const TEXT: u32 = rgb(0xFFFFFF);
-const BORDER: u32 = rgb(0x656566);
-const MUTED: u32 = rgb(0xF0F8FF);
-const CPU_NAME: u32 = rgb(0xFFD700);
-const GPU_NAME: u32 = rgb(0x00FA9A);
-const TEMPERATURE: u32 = rgb(0xFFC0CB);
-const TRACK: u32 = rgb(0x5F5F5F);
-const TRACK_SHADES: [u32; 2] = [rgb(0x5F5F5F), rgb(0x414141)];
-const MEMORY_SHADES: [u32; 2] = [rgb(0x3399CC), rgb(0x1387B4)];
-const GPU_SHADES: [u32; 2] = [rgb(0x009900), rgb(0x008700)];
-// The legacy monitor's core colors, with bright upper and darker lower halves.
-const CORE_SHADES: [[u32; 2]; 16] = [
-    [rgb(0x66B3FF), rgb(0x1B71FE)],
-    [rgb(0x00E3E3), rgb(0x00B6B6)],
-    [rgb(0x6FE499), rgb(0x28BE45)],
-    [rgb(0xFFE666), rgb(0xFEB322)],
-    [rgb(0xFDA853), rgb(0xDC6C2C)],
-    [rgb(0xF65051), rgb(0xBE2A2C)],
-    [rgb(0xFC45D0), rgb(0xD9009D)],
-    [rgb(0xCC66CC), rgb(0xA329A3)],
-    [rgb(0x0066FF), rgb(0x0052CC)],
-    MEMORY_SHADES,
-    GPU_SHADES,
-    [rgb(0x99CC00), rgb(0x989E00)],
-    [rgb(0xCC6633), rgb(0xB2411B)],
-    [rgb(0xCC0033), rgb(0x9E001C)],
-    [rgb(0xCC00CC), rgb(0xB0009A)],
-    [rgb(0xC35DD5), rgb(0xAD3AC7)],
-];
-
 pub fn show_error(error: &str) {
     let message = wide(error);
     // SAFETY: both strings are terminated and live for the synchronous call.
@@ -96,6 +69,9 @@ impl GdiObjects {
         Ok(objects)
     }
     fn fonts(&mut self, dpi: u32) -> Result<(), String> {
+        self.fonts_for_theme(dpi, Theme::Default)
+    }
+    fn fonts_for_theme(&mut self, dpi: u32, theme: Theme) -> Result<(), String> {
         for font in &mut self.fonts {
             if !font.is_null() {
                 unsafe {
@@ -122,7 +98,11 @@ impl GdiObjects {
                     DEFAULT_CHARSET as u32,
                     0,
                     0,
-                    CLEARTYPE_QUALITY as u32,
+                    if theme == Theme::Overlay {
+                        NONANTIALIASED_QUALITY as u32
+                    } else {
+                        CLEARTYPE_QUALITY as u32
+                    },
                     0,
                     w!("Segoe UI"),
                 )
@@ -230,6 +210,7 @@ struct App {
     wheel_remainder: i32,
     content_height: i32,
     window_shape: Option<PanelShape>,
+    width: i32,
     height: i32,
     topmost: bool,
     settings: Arc<crate::settings::SharedSettings>,
@@ -253,6 +234,7 @@ pub fn run(
     }
     let dpi = unsafe { GetDpiForSystem() }.max(96);
     let preferences = settings.get();
+    let window_width = themes::width(preferences.theme);
     let (window_x, window_y) = preferences.window_position.unwrap_or((40, 80));
     let instance = unsafe { GetModuleHandleW(null()) };
     let resource_icon = |id: usize| unsafe { LoadIconW(instance, id as _) };
@@ -265,6 +247,7 @@ pub fn run(
         wheel_remainder: 0,
         content_height: INITIAL_HEIGHT,
         window_shape: None,
+        width: window_width,
         height: INITIAL_HEIGHT,
         topmost: preferences.topmost,
         settings,
@@ -294,13 +277,17 @@ pub fn run(
                 WS_EX_APPWINDOW
             } else {
                 WS_EX_TOOLWINDOW
-            }) | if app.topmost { WS_EX_TOPMOST } else { 0 },
+            }) | if app.preferences.theme == Theme::Overlay {
+                WS_EX_LAYERED
+            } else {
+                0
+            } | if app.topmost { WS_EX_TOPMOST } else { 0 },
             class.lpszClassName,
             w!("monitor2"),
             WS_POPUP,
             window_x,
             window_y,
-            scale(WIDTH, dpi),
+            scale(window_width, dpi),
             scale(INITIAL_HEIGHT, dpi),
             null_mut(),
             null_mut(),
@@ -315,7 +302,10 @@ pub fn run(
         return Err(last_error("CreateWindow"));
     }
     app.dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-    let resources = app.gdi.fonts(app.dpi).and_then(|()| Logos::new(app.dpi));
+    let resources = app
+        .gdi
+        .fonts_for_theme(app.dpi, app.preferences.theme)
+        .and_then(|()| Logos::new(app.dpi));
     match resources {
         Ok(logos) => app.logos = logos,
         Err(error) => {
@@ -326,6 +316,13 @@ pub fn run(
             return Err(error);
         }
     }
+    if let Err(error) = apply_window_theme(hwnd, app.preferences.theme) {
+        unsafe {
+            DestroyWindow(hwnd);
+            UnregisterClassW(class.lpszClassName, instance);
+        }
+        return Err(error);
+    }
     unsafe {
         // The restored position may be on a different-DPI monitor from the system.
         // No App borrow is held across this synchronous, reentrant call.
@@ -334,7 +331,7 @@ pub fn run(
             null_mut(),
             0,
             0,
-            scale(WIDTH, app.dpi),
+            scale(app.width, app.dpi),
             scale(INITIAL_HEIGHT, app.dpi),
             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         );
@@ -357,11 +354,11 @@ pub fn run(
             UnregisterClassW(class.lpszClassName, instance);
             return Err(last_error("SetTimer"));
         }
-        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
     unsafe {
         refresh(hwnd, &mut *app);
         keep_window_on_screen(hwnd);
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
     let mut message = MSG::default();
     let result = loop {
@@ -462,7 +459,22 @@ unsafe extern "system" fn window_proc(
             unsafe {
                 (*pointer).topmost = topmost;
                 SetTimer(hwnd, TIMER, preferences.interval_ms, None);
+                let theme_changed = (*pointer).preferences.theme != preferences.theme;
                 (*pointer).preferences = preferences;
+                if theme_changed {
+                    (*pointer).scroll = 0;
+                    (*pointer).wheel_remainder = 0;
+                    let theme = (*pointer).preferences.theme;
+                    let dpi = (*pointer).dpi;
+                    if let Err(error) = (*pointer)
+                        .gdi
+                        .fonts_for_theme(dpi, theme)
+                        .and_then(|()| apply_window_theme(hwnd, theme))
+                    {
+                        show_error(&error);
+                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    }
+                }
                 SetWindowPos(
                     hwnd,
                     if topmost {
@@ -532,7 +544,10 @@ unsafe extern "system" fn window_proc(
                         PostMessageW(hwnd, WM_CLOSE, 0, 0);
                     }
                 }
-                if let Err(error) = (*pointer).gdi.fonts(dpi) {
+                if let Err(error) = (*pointer)
+                    .gdi
+                    .fonts_for_theme(dpi, (*pointer).preferences.theme)
+                {
                     eprintln!("{error}");
                     PostMessageW(hwnd, WM_CLOSE, 0, 0);
                 }
@@ -656,8 +671,48 @@ unsafe fn keep_window_on_screen(hwnd: HWND) {
     }
 }
 
+fn apply_window_theme(hwnd: HWND, theme: Theme) -> Result<(), String> {
+    // SAFETY: live UI-thread window. No App borrow crosses these reentrant APIs.
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+    let new_style = if theme == Theme::Overlay {
+        style | WS_EX_LAYERED | WS_EX_NOACTIVATE
+    } else {
+        style & !(WS_EX_LAYERED | WS_EX_NOACTIVATE)
+    };
+    if style != new_style {
+        unsafe {
+            SetLastError(0);
+        }
+        if unsafe { SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style as isize) } == 0
+            && unsafe { GetLastError() } != 0
+        {
+            return Err(last_error("SetWindowLongPtr"));
+        }
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
+    }
+    if theme == Theme::Overlay
+        && unsafe {
+            SetLayeredWindowAttributes(hwnd, themes::overlay::TRANSPARENT_COLOR, 255, LWA_COLORKEY)
+        } == 0
+    {
+        return Err(last_error("SetLayeredWindowAttributes"));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PanelShape {
+    theme: Theme,
     width: i32,
     height: i32,
     dpi: u32,
@@ -675,6 +730,14 @@ impl PanelShape {
         // SAFETY: all regions are owned locally until the union is returned. Each
         // temporary is deleted on success/failure; the caller owns the result.
         unsafe {
+            if self.theme == Theme::Overlay {
+                let region = CreateRectRgn(0, 0, self.width, self.height);
+                return if region.is_null() {
+                    Err(last_error("CreateRectRgn"))
+                } else {
+                    Ok(region)
+                };
+            }
             let region = CreateRectRgn(0, 0, 0, 0);
             if region.is_null() {
                 return Err(last_error("CreateRectRgn"));
@@ -735,6 +798,7 @@ unsafe fn update_window_shape(hwnd: HWND, pointer: *mut App) {
         // SAFETY: UI-thread App; this borrow ends before SetWindowRgn can reenter.
         let app = unsafe { &*pointer };
         PanelShape {
+            theme: app.preferences.theme,
             width: rect.right,
             height: rect.bottom,
             dpi,
@@ -768,7 +832,7 @@ unsafe fn update_window_shape(hwnd: HWND, pointer: *mut App) {
 }
 
 unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
-    let (resized, height, dpi) = {
+    let (resized, width, height, dpi) = {
         // SAFETY: caller passes the UI-thread App that lives through the message loop.
         // End this mutable borrow before SetWindowPos can dispatch nested messages.
         let app = unsafe { &mut *pointer };
@@ -819,8 +883,8 @@ unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
 
         let cpus = displayed_cpus(app);
         let rows = core_rows(cpus.len());
-        app.content_height = cpu_panel_height(rows)
-            + app.snapshot.gpus.len().max(1) as i32 * (PANEL_GAP + GPU_PANEL_HEIGHT);
+        app.content_height =
+            themes::content_height(app.preferences.theme, rows, app.snapshot.gpus.len());
         let mut info = MONITORINFO {
             cbSize: size_of::<MONITORINFO>() as u32,
             ..Default::default()
@@ -834,10 +898,12 @@ unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
             800
         };
         let height = app.content_height.min(max_height);
-        let resized = height != app.height;
+        let width = themes::width(app.preferences.theme);
+        let resized = height != app.height || width != app.width;
+        app.width = width;
         app.height = height;
         app.scroll = app.scroll.clamp(0, (app.content_height - height).max(0));
-        (resized, height, app.dpi)
+        (resized, width, height, app.dpi)
     };
     if resized {
         unsafe {
@@ -846,7 +912,7 @@ unsafe fn refresh(hwnd: HWND, pointer: *mut App) {
                 null_mut(),
                 0,
                 0,
-                scale(WIDTH, dpi),
+                scale(width, dpi),
                 scale(height, dpi),
                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
@@ -933,7 +999,7 @@ fn paint(hwnd: HWND, app: &mut App) {
     let mut ps = PAINTSTRUCT::default();
     // SAFETY: every BeginPaint is paired with EndPaint, including buffer allocation failure.
     let screen = unsafe { BeginPaint(hwnd, &mut ps) };
-    let width = scale(WIDTH, app.dpi);
+    let width = scale(app.width, app.dpi);
     let height = scale(app.height, app.dpi);
     let buffered = app.gdi.buffer(screen, width, height);
     let dc = if buffered { app.gdi.dc } else { screen };
@@ -942,163 +1008,13 @@ fn paint(hwnd: HWND, app: &mut App) {
     }
     let old_font = unsafe { SelectObject(dc, app.gdi.fonts[1]) };
     let mut painter = Painter {
+        theme: app.preferences.theme,
         dc,
         dpi: app.dpi,
         offset: app.scroll,
         fonts: app.gdi.fonts,
     };
-    painter.rect(0, app.scroll, WIDTH, app.height, BG);
-    painter.panel(0);
-    let cpus = displayed_cpus(app);
-    let rows = core_rows(cpus.len());
-    let usage_width = painter.percentage_width(3).max(28);
-    let usage_x = WIDTH - 2 - usage_width;
-    let usage_bar_width = usage_x - 38 - 2;
-    let core_percent_width = painter.percentage_width(2).max(21);
-    let logo = if app.snapshot.cpu_name.to_ascii_lowercase().contains("intel") {
-        app.logos.0[0]
-    } else {
-        app.logos.0[1]
-    };
-    painter.icon(4, 4, 28, logo);
-    painter.text(40, 3, 94, 16, "CPU Usage", 0, TEXT);
-    painter.text(
-        usage_x,
-        18,
-        usage_width,
-        14,
-        &percentage(app.snapshot.cpu_total),
-        3,
-        TEXT,
-    );
-    painter.bar(
-        38,
-        24,
-        usage_bar_width,
-        6,
-        app.snapshot.cpu_total,
-        CORE_SHADES[0],
-    );
-    let cpu_name = app.snapshot.cpu_name.trim_end_matches(" Processor");
-    let cpu_name = cpu_name
-        .rsplit_once(' ')
-        .filter(|(_, suffix)| suffix.ends_with("-Core"))
-        .map_or(cpu_name, |(model, _)| model);
-    painter.text(4, 36, WIDTH - 8, 12, cpu_name, 2, CPU_NAME);
-    painter.memory(
-        48,
-        "RAM",
-        app.snapshot.ram.map(|m| (m.used(), m.available, m.total)),
-        MEMORY_SHADES,
-    );
-    painter.rect(6, 90, WIDTH - 12, 1, TRACK);
-    for (i, cpu) in cpus.iter().enumerate() {
-        let column = if cpus.len() <= 8 {
-            0
-        } else {
-            i / rows as usize
-        };
-        let row = if cpus.len() <= 8 {
-            i
-        } else {
-            i % rows as usize
-        };
-        let x = 4 + column as i32 * 68;
-        let y = CORE_TOP + row as i32 * CORE_ROW;
-        let width = if cpus.len() <= 8 { WIDTH - 8 } else { 64 };
-        let number_width = if app.preferences.show_core_numbers {
-            16
-        } else {
-            0
-        };
-        if app.preferences.show_core_numbers {
-            painter.text(x, y, 16, CORE_ROW, &format!("{:02}", cpu.index), 2, MUTED);
-        }
-        let percent_width = if app.preferences.show_core_percent {
-            core_percent_width
-        } else {
-            0
-        };
-        let bar_width = width - number_width - percent_width - 1;
-        painter.bar(
-            x + number_width,
-            y + 2,
-            bar_width,
-            6,
-            cpu.usage,
-            CORE_SHADES[i % CORE_SHADES.len()],
-        );
-        if app.preferences.show_core_percent {
-            painter.text(
-                x + width - percent_width,
-                y,
-                percent_width,
-                CORE_ROW,
-                &percentage(cpu.usage),
-                2,
-                TEXT,
-            );
-        }
-    }
-    let gpu_start = cpu_panel_height(rows) + PANEL_GAP;
-    for (i, gpu) in app.snapshot.gpus.iter().enumerate() {
-        let y = gpu_start + i as i32 * (GPU_PANEL_HEIGHT + PANEL_GAP);
-        painter.panel(y);
-        painter.icon(4, y + 4, 28, app.logos.0[2]);
-        painter.text(40, y + 3, 74, 16, "GPU Usage", 0, TEXT);
-        painter.text(
-            112,
-            y + 3,
-            24,
-            14,
-            &gpu.temperature.map_or("N/A".into(), |t| format!("{t}°")),
-            3,
-            TEMPERATURE,
-        );
-        painter.text(
-            usage_x,
-            y + 19,
-            usage_width,
-            14,
-            &percentage(gpu.usage),
-            3,
-            TEXT,
-        );
-        painter.bar(38, y + 24, usage_bar_width, 6, gpu.usage, GPU_SHADES);
-        painter.text(
-            4,
-            y + 36,
-            WIDTH - 8,
-            12,
-            gpu.name.strip_prefix("NVIDIA ").unwrap_or(&gpu.name),
-            2,
-            GPU_NAME,
-        );
-        let memory = gpu
-            .used
-            .zip(gpu.total)
-            .map(|(used, total)| (used, total.saturating_sub(used), total));
-        painter.memory(y + 48, "VRAM", memory, MEMORY_SHADES);
-    }
-    if app.snapshot.gpus.is_empty() {
-        painter.panel(gpu_start);
-        painter.icon(4, gpu_start + 4, 28, app.logos.0[2]);
-        painter.text(40, gpu_start + 3, 94, 16, "GPU Usage", 0, TEXT);
-        painter.text(40, gpu_start + 19, 94, 14, "N/A", 1, MUTED);
-    }
-    if app.content_height > app.height {
-        let track = app.height - 12;
-        let thumb = (track * app.height / app.content_height).max(16);
-        let y = 6 + app.scroll * (track - thumb) / (app.content_height - app.height);
-        painter.rect(WIDTH - 5, app.scroll + y, 2, thumb, MUTED);
-    }
-    painter.frame(0, cpu_panel_height(rows));
-    for i in 0..app.snapshot.gpus.len().max(1) {
-        painter.frame(
-            gpu_start + i as i32 * (GPU_PANEL_HEIGHT + PANEL_GAP),
-            GPU_PANEL_HEIGHT,
-        );
-    }
+    themes::draw(&mut painter, app);
     unsafe {
         SelectObject(dc, old_font);
         if buffered {
@@ -1108,6 +1024,7 @@ fn paint(hwnd: HWND, app: &mut App) {
     }
 }
 struct Painter {
+    theme: Theme,
     dc: HDC,
     dpi: u32,
     offset: i32,
@@ -1130,25 +1047,7 @@ impl Painter {
         }
     }
     fn frame(&mut self, y: i32, height: i32) {
-        let diameter = scale(CORNER_DIAMETER, self.dpi);
-        // SAFETY: stock objects are borrowed. Restore both selections after drawing;
-        // the hollow brush preserves the already painted contents. DC_PEN is one device pixel.
-        unsafe {
-            let old_pen = SelectObject(self.dc, GetStockObject(DC_PEN));
-            let old_brush = SelectObject(self.dc, GetStockObject(HOLLOW_BRUSH));
-            SetDCPenColor(self.dc, BORDER);
-            RoundRect(
-                self.dc,
-                scale(1, self.dpi),
-                scale(y + 1 - self.offset, self.dpi),
-                scale(WIDTH - 1, self.dpi),
-                scale(y + height - 1 - self.offset, self.dpi),
-                diameter,
-                diameter,
-            );
-            SelectObject(self.dc, old_brush);
-            SelectObject(self.dc, old_pen);
-        }
+        themes::frame(self, y, height);
     }
     fn rect(&mut self, x: i32, y: i32, width: i32, height: i32, color: u32) {
         let rect = RECT {
@@ -1159,7 +1058,7 @@ impl Painter {
         };
         // SAFETY: stock brush is borrowed; changing its color allocates no GDI objects.
         unsafe {
-            SetDCBrushColor(self.dc, color);
+            SetDCBrushColor(self.dc, themes::color(self.theme, color));
             FillRect(self.dc, &rect, GetStockObject(DC_BRUSH).cast());
         }
     }
@@ -1184,7 +1083,7 @@ impl Painter {
         };
         unsafe {
             SelectObject(self.dc, self.fonts[font]);
-            SetTextColor(self.dc, color);
+            SetTextColor(self.dc, themes::color(self.theme, color));
             DrawTextW(
                 self.dc,
                 text.as_ptr(),
@@ -1194,26 +1093,8 @@ impl Painter {
             );
         }
     }
-    fn icon(&mut self, x: i32, y: i32, size: i32, icon: HICON) {
-        // SAFETY: owned icon sized for this DPI and live paint DC.
-        unsafe {
-            DrawIconEx(
-                self.dc,
-                scale(x, self.dpi),
-                scale(y - self.offset, self.dpi),
-                icon,
-                scale(size, self.dpi),
-                scale(size, self.dpi),
-                0,
-                null_mut(),
-                DI_NORMAL,
-            );
-        }
-        let edge = rgb(0x3F4D63);
-        self.rect(x - 1, y - 1, size + 2, 1, edge);
-        self.rect(x - 1, y + size, size + 2, 1, edge);
-        self.rect(x - 1, y, 1, size, edge);
-        self.rect(x + size, y, 1, size, edge);
+    fn icon(&mut self, x: i32, y: i32, size: i32, icon: HICON, label: &str) {
+        themes::icon(self, x, y, size, icon, label);
     }
     fn memory(&mut self, y: i32, label: &str, memory: Option<(u64, u64, u64)>, shades: [u32; 2]) {
         for (x, title) in [(6, "Used"), (50, "Free"), (94, "Total")] {
@@ -1229,17 +1110,7 @@ impl Painter {
         self.bar(36, y + 28, WIDTH - 42, 6, usage, shades);
     }
     fn panel(&mut self, y: i32) {
-        // A small number of solid bands approximates the legacy navy gradient.
-        // No bitmap, brush, or per-pixel allocation is needed during painting.
-        for band in 0..16 {
-            let mut color = 0;
-            for shift in [0, 8, 16] {
-                let top = (PANEL_TOP >> shift) & 0xff;
-                let bottom = (BG >> shift) & 0xff;
-                color |= ((top * (15 - band) + bottom * band) / 15) << shift;
-            }
-            self.rect(0, y + band as i32 * 4, WIDTH, 4, color);
-        }
+        themes::panel(self, y);
     }
     fn bar(
         &mut self,
@@ -1250,16 +1121,7 @@ impl Painter {
         value: Option<f64>,
         shades: [u32; 2],
     ) {
-        let upper = height / 2;
-        self.rect(x, y, width, upper, TRACK_SHADES[0]);
-        self.rect(x, y + upper, width, height - upper, TRACK_SHADES[1]);
-        if let Some(value) = value.filter(|value| value.is_finite()) {
-            let filled = (width as f64 * value.clamp(0.0, 100.0) / 100.0).round() as i32;
-            if filled > 0 {
-                self.rect(x, y, filled, upper, shades[0]);
-                self.rect(x, y + upper, filled, height - upper, shades[1]);
-            }
-        }
+        themes::bar(self, x, y, width, height, value, shades);
     }
 }
 fn scale(value: i32, dpi: u32) -> i32 {
@@ -1292,6 +1154,7 @@ mod review_tests {
                 for scroll in [0, 48, 144] {
                     let cpu_height = cpu_panel_height(rows);
                     let shape = PanelShape {
+                        theme: Theme::Default,
                         width: scale(WIDTH, dpi),
                         height: scale(480, dpi),
                         dpi,
@@ -1383,6 +1246,7 @@ mod review_tests {
             objects.dc = unsafe { CreateCompatibleDC(null_mut()) };
             assert!(!objects.dc.is_null());
             let mut painter = Painter {
+                theme: Theme::Default,
                 dc: objects.dc,
                 dpi,
                 offset: 0,

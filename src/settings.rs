@@ -7,6 +7,31 @@ use std::{
 };
 use windows_sys::{Win32::System::Registry::*, core::w};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Theme {
+    #[default]
+    Default,
+    Flat,
+    Overlay,
+}
+impl Theme {
+    pub const ALL: [Self; 3] = [Self::Default, Self::Flat, Self::Overlay];
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Flat => "flat",
+            Self::Overlay => "overlay",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "デフォルト",
+            Self::Flat => "フラット",
+            Self::Overlay => "オーバレイ",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub topmost: bool,
@@ -16,6 +41,7 @@ pub struct Settings {
     pub show_core_percent: bool,
     pub show_core_numbers: bool,
     pub window_position: Option<(i32, i32)>,
+    pub theme: Theme,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -27,6 +53,7 @@ impl Default for Settings {
             show_core_percent: false,
             show_core_numbers: true,
             window_position: None,
+            theme: Theme::Default,
         }
     }
 }
@@ -49,6 +76,12 @@ impl Settings {
                     .map_err(|_| format!("{key}: true/falseを指定してください"))
             };
             match key.trim() {
+                "theme" => {
+                    result.theme = Theme::ALL
+                        .into_iter()
+                        .find(|t| t.key() == value)
+                        .ok_or("テーマが不正です")?
+                }
                 "topmost" => result.topmost = boolean()?,
                 "autostart" => result.autostart = boolean()?,
                 "interval_ms" => {
@@ -101,6 +134,7 @@ impl Settings {
         if let Some((x, y)) = self.window_position {
             text.push_str(&format!("window_x={x}\nwindow_y={y}\n"));
         }
+        text.push_str(&format!("theme={}\n", self.theme.key()));
         text
     }
     pub fn load() -> Result<Self, String> {
@@ -280,6 +314,22 @@ impl SharedSettings {
 mod tests {
     use super::*;
     #[test]
+    fn themes_round_trip_and_old_settings_keep_default() {
+        assert_eq!(
+            Settings::parse("interval_ms=1000\n").unwrap().theme,
+            Theme::Default
+        );
+        for theme in Theme::ALL {
+            let settings = Settings {
+                theme,
+                window_position: Some((-100, 200)),
+                ..Settings::default()
+            };
+            assert_eq!(Settings::parse(&settings.encode()).unwrap(), settings);
+        }
+        assert!(Settings::parse("theme=unknown\n").is_err());
+    }
+    #[test]
     fn configuration_round_trip_and_unknown_keys() {
         let s = Settings {
             topmost: false,
@@ -289,6 +339,7 @@ mod tests {
             show_core_percent: true,
             show_core_numbers: false,
             window_position: Some((-1920, 80)),
+            theme: Theme::Default,
         };
         assert_eq!(
             Settings::parse(&(s.encode() + "future_key=value\n")).unwrap(),
