@@ -20,6 +20,8 @@ cargo build --locked
 
 cargoが見つからない場合はターミナルを開き直し、RustupのbinがPATHにあることを確認します。依存バージョンはCargo.lockに固定しますが、stableツールチェーン自体は更新されるため、性能測定や不具合報告にはrustc --versionも記録します。
 
+既存環境のRustを更新する場合は`rustup update stable`を実行し、下記の基本チェックと起動終了検査で互換性を確認します。2026-11-14にRust 1.100.0（x86_64-pc-windows-msvc）で検証済みです。確認範囲と制約は[phases.md](phases.md#rust-11000への更新)を参照してください。
+
 ## 実行と検証
 
 リポジトリ直下で実行します。

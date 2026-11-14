@@ -1,0 +1,33 @@
+{
+  "SourceCommit": "1a28dba1081beeb07574d3a7f60e09b28034a33c",
+  "LockSHA256": "7D1C8CB33A864C1162D1F97D6FA2AC10CFD5CF108DFE476B3C0401C23F29F335",
+  "OldCompiler": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "NewCompiler": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+  "Mode": "release; normal resident; same source and Cargo.lock; 3 paired runs; 120 seconds plus 10 seconds warmup",
+  "Settings": "theme=default; interval_ms=1000; physical_cores=false; show_core_percent=true; show_core_numbers=false; topmost=true; autostart=false; drag_enabled=true; left_click_through=true",
+  "Positions": "Left x=100; right x=300; y=100; swapped in run 2",
+  "CPU": "AMD Ryzen 7 5800X3D 8-Core Processor           ",
+  "GPU": [
+    {
+      "Name": "NVIDIA GeForce RTX 4070 Ti",
+      "DriverVersion": "32.0.16.1656"
+    }
+  ],
+  "OS": {
+    "Caption": "Microsoft Windows 11 Pro",
+    "Version": "10.0.26300",
+    "BuildNumber": "26300"
+  },
+  "Artifacts": [
+    {
+      "Bytes": 676864,
+      "Rust": "1.98.1",
+      "SHA256": "33BDAE85314D0F1CCC0D04F5D26ACD2E3A5CDFD7763C576F47E20C0BBE92793B"
+    },
+    {
+      "Bytes": 680960,
+      "Rust": "1.100.0",
+      "SHA256": "2A703FE4D4B324D830FF78E5AFDFF040D152D34E0EFF61BF47594A0FECFA9E40"
+    }
+  ]
+}
